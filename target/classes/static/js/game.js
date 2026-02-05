@@ -85,6 +85,49 @@ let shrinkTargets = [];
 let speedTargets = [];
 let particles = [];
 let stars = [];
+let enemySnake = null; // Current enemy snake (only one at a time)
+let enemyBullets = []; // Bullets shot by enemy snakes
+
+// Enemy snake spawn timer
+let enemySpawnTimer = 0;
+let nextEnemySpawnTime = 60; // Start with 5 seconds for first spawn, then randomize 10-15 seconds
+
+// Enemy snake types
+const ENEMY_TYPES = {
+    DUMB: {
+        name: 'Dumb',
+        color: '#d4a574',        // Beige
+        headColor: '#c9956c',
+        glowColor: 'rgba(212, 165, 116, 0.5)',
+        accuracy: 0.2,          // 20% accuracy
+        moveAccuracy: 0.5,      // 50% chance to make correct move
+        crashChance: 0.002,     // 0.2% chance to crash each frame (was 3% - way too high!)
+        shootInterval: 30,      // Shoots every 2.5 seconds
+        spawnChance: 50         // 50% chance to spawn this type
+    },
+    MEDIUM: {
+        name: 'Medium',
+        color: '#ffd700',        // Yellow
+        headColor: '#ffec00',
+        glowColor: 'rgba(255, 215, 0, 0.5)',
+        accuracy: 0.5,          // 50% accuracy
+        moveAccuracy: 0.75,     // 75% correct moves
+        crashChance: 0.001,     // 0.1% crash chance (was 1%)
+        shootInterval: 20,      // Shoots every ~1.7 seconds
+        spawnChance: 35         // 35% chance
+    },
+    SMART: {
+        name: 'Smart',
+        color: '#ff4444',        // Red
+        headColor: '#ff6666',
+        glowColor: 'rgba(255, 68, 68, 0.5)',
+        accuracy: 0.85,         // 85% accuracy
+        moveAccuracy: 0.95,     // 95% correct moves
+        crashChance: 0.0005,    // 0.05% crash chance (was 0.2%)
+        shootInterval: 12,      // Shoots every second
+        spawnChance: 15         // 15% chance
+    }
+};
 
 // Auto-fire
 let spacePressed = false;
@@ -112,7 +155,9 @@ class SoundEngine {
     constructor() {
         this.ctx = audioCtx;
         this.currentMusic = null;
-        this.musicPlaying = false;
+        this.currentMusicType = null; // 'menu', 'game', 'gameOverWin', 'gameOverLose'
+        this.loopChecker = null;
+        this.midiReady = false;
         
         // MIDI file paths
         this.MUSIC = {
@@ -121,6 +166,25 @@ class SoundEngine {
             gameOverLose: '/music/requiem.mid',
             gameOverWin: '/music/we are the champions.mid'
         };
+        
+        // Wait for MIDIjs without playing anything
+        this.initMidi();
+    }
+    
+    initMidi() {
+        const checkMidi = () => {
+            if (typeof MIDIjs !== 'undefined') {
+                this.midiReady = true;
+                console.log('MIDIjs ready (no pre-warm)');
+                // Just preload files into browser cache (no audio)
+                Object.values(this.MUSIC).forEach(file => {
+                    fetch(file).catch(() => {});
+                });
+            } else {
+                setTimeout(checkMidi, 100);
+            }
+        };
+        checkMidi();
     }
     
     // ========== SOUND EFFECTS (8-bit style) ==========
@@ -224,84 +288,135 @@ class SoundEngine {
     }
     
     // ========== MIDI MUSIC PLAYBACK ==========
-    playMidi(filePath, loop = true) {
-        if (soundMuted) return;
+    
+    // Estimated durations for each track (in milliseconds)
+    // These are approximate - better to be slightly shorter to ensure looping
+    MUSIC_DURATIONS = {
+        '/music/entertainer.mid': 120000,      // ~2 minutes
+        '/music/macarena.mid': 180000,         // ~3 minutes
+        '/music/requiem.mid': 240000,          // ~4 minutes
+        '/music/we are the champions.mid': 180000  // ~3 minutes
+    };
+    
+    // Internal method to actually play MIDI
+    _playMidiInternal(filePath, shouldLoop) {
+        if (typeof MIDIjs === 'undefined') return;
         
-        try {
-            // Stop any currently playing music
-            this.stopMusic();
+        console.log('_playMidiInternal:', filePath, 'loop:', shouldLoop);
+        MIDIjs.play(filePath);
+        this.lastPlayTime = Date.now();
+        this.isLooping = shouldLoop;
+        
+        if (shouldLoop) {
+            // Get estimated duration for this track (default 2 minutes)
+            const duration = this.MUSIC_DURATIONS[filePath] || 120000;
             
-            this.currentMusic = filePath;
-            this.musicPlaying = true;
-            
-            // Use MIDIjs library
-            if (typeof MIDIjs !== 'undefined') {
-                MIDIjs.play(filePath);
-                
-                // Handle looping
-                if (loop) {
-                    MIDIjs.player_callback = (event) => {
-                        if (event.time === 0 && this.musicPlaying && this.currentMusic === filePath) {
-                            // Song ended, replay if still should be playing
-                            setTimeout(() => {
-                                if (this.musicPlaying && this.currentMusic === filePath && !soundMuted) {
-                                    MIDIjs.play(filePath);
-                                }
-                            }, 500);
-                        }
-                    };
+            // Set up loop restart based on estimated duration
+            // Don't use MIDIjs.playing - it's unreliable
+            this.loopChecker = setTimeout(() => {
+                if (this.currentMusic === filePath && !soundMuted && this.isLooping) {
+                    console.log('Looping (duration-based):', filePath);
+                    this._playMidiInternal(filePath, true);
                 }
-            }
-        } catch (e) {
-            console.error('Error playing MIDI:', e);
+            }, duration);
         }
     }
     
-    stopMusic() {
-        this.musicPlaying = false;
-        this.currentMusic = null;
+    // Stop all music completely
+    stopAllMusic() {
+        console.log('stopAllMusic called');
         
+        // Clear any loop timer
+        if (this.loopChecker) {
+            clearTimeout(this.loopChecker);
+            this.loopChecker = null;
+        }
+        
+        this.isLooping = false;
+        
+        // Stop MIDIjs
         try {
             if (typeof MIDIjs !== 'undefined') {
                 MIDIjs.stop();
             }
         } catch (e) {}
+        
+        this.currentMusic = null;
+        this.currentMusicType = null;
     }
     
     // ========== MUSIC CONTROL FUNCTIONS ==========
+    
+    // Play menu music (Entertainer) - loops
     playMenuMusic() {
         if (soundMuted) return;
-        this.playMidi(this.MUSIC.menu, true);
+        if (this.currentMusicType === 'menu') return; // Already playing
+        
+        console.log('=== PLAY MENU MUSIC (Entertainer) ===');
+        this.stopAllMusic();
+        this.currentMusic = this.MUSIC.menu;
+        this.currentMusicType = 'menu';
+        
+        if (this.midiReady) {
+            this._playMidiInternal(this.MUSIC.menu, true);
+        } else {
+            // Wait for MIDIjs
+            setTimeout(() => this.playMenuMusic(), 200);
+        }
     }
     
     stopMenuMusic() {
-        if (this.currentMusic === this.MUSIC.menu) {
-            this.stopMusic();
+        if (this.currentMusicType === 'menu') {
+            console.log('=== STOP MENU MUSIC ===');
+            this.stopAllMusic();
         }
     }
     
+    // Play game music (Macarena) - loops
     playGameMusic() {
         if (soundMuted) return;
-        this.playMidi(this.MUSIC.game, true);
+        if (this.currentMusicType === 'game') return; // Already playing
+        
+        console.log('=== PLAY GAME MUSIC (Macarena) ===');
+        this.stopAllMusic();
+        this.currentMusic = this.MUSIC.game;
+        this.currentMusicType = 'game';
+        
+        if (this.midiReady) {
+            this._playMidiInternal(this.MUSIC.game, true);
+        } else {
+            setTimeout(() => this.playGameMusic(), 200);
+        }
     }
     
     stopGameMusic() {
-        if (this.currentMusic === this.MUSIC.game) {
-            this.stopMusic();
+        if (this.currentMusicType === 'game') {
+            console.log('=== STOP GAME MUSIC ===');
+            this.stopAllMusic();
         }
     }
     
+    // Play game over music - does NOT loop
     playGameOverMusic(beatRecord) {
         if (soundMuted) return;
         
-        this.stopMusic();
+        console.log('=== PLAY GAME OVER MUSIC ===', 'beatRecord:', beatRecord);
+        this.stopAllMusic();
         
         if (beatRecord) {
-            // Play "We Are The Champions"
-            this.playMidi(this.MUSIC.gameOverWin, false);
+            // Play "We Are The Champions" - no loop
+            this.currentMusic = this.MUSIC.gameOverWin;
+            this.currentMusicType = 'gameOverWin';
+            if (this.midiReady) {
+                this._playMidiInternal(this.MUSIC.gameOverWin, false);
+            }
         } else {
-            // Play "Requiem"
-            this.playMidi(this.MUSIC.gameOverLose, false);
+            // Play "Requiem" - no loop
+            this.currentMusic = this.MUSIC.gameOverLose;
+            this.currentMusicType = 'gameOverLose';
+            if (this.midiReady) {
+                this._playMidiInternal(this.MUSIC.gameOverLose, false);
+            }
         }
     }
     
@@ -309,7 +424,7 @@ class SoundEngine {
     setMuted(muted) {
         soundMuted = muted;
         if (muted) {
-            this.stopMusic();
+            this.stopAllMusic();
         }
     }
     
@@ -839,6 +954,474 @@ class SpeedTarget {
 }
 
 // ==========================================
+// ENEMY SNAKE CLASS
+// ==========================================
+class EnemySnake {
+    constructor(type, initialLength) {
+        console.log('EnemySnake constructor called. Type:', type, 'Length:', initialLength);
+        this.type = type;
+        this.typeData = ENEMY_TYPES[type];
+        this.segments = [];
+        this.length = initialLength;
+        this.dirX = 0;
+        this.dirY = 0;
+        this.shootCooldown = this.typeData.shootInterval;
+        this.alive = true;
+        this.spawnAnimation = 15; // Blink for spawn animation (reduced from 30)
+        
+        // Spawn at random edge
+        this.spawn();
+        console.log('EnemySnake spawned. Segments:', this.segments.length, 'Position:', this.segments[0], 'Direction:', this.dirX, this.dirY);
+    }
+    
+    spawn() {
+        // Choose random edge to spawn from
+        const edge = Math.floor(Math.random() * 4);
+        let headX, headY, dirX, dirY;
+        
+        // Calculate safe spawn position - head at edge, body extends INTO screen
+        const margin = BLOCK_SIZE * 2; // Distance from edge for head
+        const bodySpace = BLOCK_SIZE * this.length; // Space needed for body
+        
+        switch(edge) {
+            case 0: // Top - snake enters from top, moving down
+                headX = Math.floor(Math.random() * (GAME_WIDTH / BLOCK_SIZE - 4) + 2) * BLOCK_SIZE;
+                headY = margin;
+                dirX = 0;
+                dirY = BLOCK_SIZE; // Moving down
+                break;
+            case 1: // Bottom - snake enters from bottom, moving up  
+                headX = Math.floor(Math.random() * (GAME_WIDTH / BLOCK_SIZE - 4) + 2) * BLOCK_SIZE;
+                headY = GAME_HEIGHT - margin;
+                dirX = 0;
+                dirY = -BLOCK_SIZE; // Moving up
+                break;
+            case 2: // Left - snake enters from left, moving right
+                headX = margin;
+                headY = Math.floor(Math.random() * (GAME_HEIGHT / BLOCK_SIZE - 4) + 2) * BLOCK_SIZE;
+                dirX = BLOCK_SIZE; // Moving right
+                dirY = 0;
+                break;
+            case 3: // Right - snake enters from right, moving left
+                headX = GAME_WIDTH - margin;
+                headY = Math.floor(Math.random() * (GAME_HEIGHT / BLOCK_SIZE - 4) + 2) * BLOCK_SIZE;
+                dirX = -BLOCK_SIZE; // Moving left
+                dirY = 0;
+                break;
+        }
+        
+        this.dirX = dirX;
+        this.dirY = dirY;
+        
+        // Create segments: tail first, head last
+        // Body extends FORWARD (in direction of movement) from tail to head
+        // This makes the snake "enter" the screen with head first
+        for (let i = 0; i < this.length; i++) {
+            // Tail is furthest from edge, head is at edge
+            const distFromHead = this.length - 1 - i;
+            this.segments.push([
+                headX - dirX * distFromHead,
+                headY - dirY * distFromHead
+            ]);
+        }
+        
+        console.log('Spawn edge:', edge, 'Head:', this.getHead(), 'Tail:', this.segments[0], 'All on screen:', 
+            this.segments.every(s => s[0] >= 0 && s[0] < GAME_WIDTH && s[1] >= 0 && s[1] < GAME_HEIGHT));
+    }
+    
+    getHead() {
+        return this.segments.length > 0 ? this.segments[this.segments.length - 1] : null;
+    }
+    
+    update() {
+        if (!this.alive) return;
+        
+        // Spawn animation countdown
+        if (this.spawnAnimation > 0) {
+            this.spawnAnimation--;
+            return;
+        }
+        
+        // Random crash based on type
+        if (Math.random() < this.typeData.crashChance) {
+            this.die('random_crash');
+            return;
+        }
+        
+        // AI decision making
+        this.makeDecision();
+        
+        // Move
+        const head = this.getHead();
+        if (!head) return;
+        
+        const newX = head[0] + this.dirX;
+        const newY = head[1] + this.dirY;
+        
+        // Check wall collision
+        if (newX < 0 || newX >= GAME_WIDTH || newY < 0 || newY >= GAME_HEIGHT) {
+            this.die('wall_collision');
+            return;
+        }
+        
+        // Check self collision
+        for (let i = 0; i < this.segments.length - 1; i++) {
+            if (this.segments[i][0] === newX && this.segments[i][1] === newY) {
+                this.die('self_collision');
+                return;
+            }
+        }
+        
+        // Check collision with player snake
+        for (const seg of snake) {
+            if (seg[0] === newX && seg[1] === newY) {
+                this.die('player_collision');
+                return;
+            }
+        }
+        
+        // Check collision with dangerous targets
+        for (const t of targets) {
+            if (t.isActive() && t.occupiesCell(newX, newY)) {
+                this.die('target_collision');
+                return;
+            }
+        }
+        
+        // Add new head
+        this.segments.push([newX, newY]);
+        
+        // Check if enemy eats food
+        if (newX === foodX && newY === foodY) {
+            this.length++;
+            spawnFood(); // Respawn food
+        }
+        
+        // Remove tail if too long
+        while (this.segments.length > this.length) {
+            this.segments.shift();
+        }
+        
+        // Shooting logic
+        this.shootCooldown--;
+        if (this.shootCooldown <= 0) {
+            this.shoot();
+            this.shootCooldown = this.typeData.shootInterval;
+        }
+    }
+    
+    makeDecision() {
+        // AI decides where to move
+        const head = this.getHead();
+        if (!head) return;
+        
+        // Target is the player's head
+        const playerHead = snake.length > 0 ? snake[snake.length - 1] : null;
+        if (!playerHead) return;
+        
+        // Calculate direction to player
+        const dx = playerHead[0] - head[0];
+        const dy = playerHead[1] - head[1];
+        
+        // Decide if making smart move or random move
+        if (Math.random() < this.typeData.moveAccuracy) {
+            // Smart move - try to get closer to player
+            const possibleMoves = [];
+            
+            // Can't reverse direction
+            if (this.dirX !== BLOCK_SIZE) possibleMoves.push([-BLOCK_SIZE, 0]);
+            if (this.dirX !== -BLOCK_SIZE) possibleMoves.push([BLOCK_SIZE, 0]);
+            if (this.dirY !== BLOCK_SIZE) possibleMoves.push([0, -BLOCK_SIZE]);
+            if (this.dirY !== -BLOCK_SIZE) possibleMoves.push([0, BLOCK_SIZE]);
+            
+            // Score each move
+            let bestMove = [this.dirX, this.dirY];
+            let bestScore = -Infinity;
+            
+            for (const move of possibleMoves) {
+                const newX = head[0] + move[0];
+                const newY = head[1] + move[1];
+                
+                // Check if move is safe
+                if (this.isSafePosition(newX, newY)) {
+                    // Score based on distance to player
+                    const distToPlayer = Math.abs(playerHead[0] - newX) + Math.abs(playerHead[1] - newY);
+                    const score = -distToPlayer; // Closer is better
+                    
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestMove = move;
+                    }
+                }
+            }
+            
+            this.dirX = bestMove[0];
+            this.dirY = bestMove[1];
+        } else {
+            // Random move
+            const moves = [];
+            if (this.dirX !== BLOCK_SIZE) moves.push([-BLOCK_SIZE, 0]);
+            if (this.dirX !== -BLOCK_SIZE) moves.push([BLOCK_SIZE, 0]);
+            if (this.dirY !== BLOCK_SIZE) moves.push([0, -BLOCK_SIZE]);
+            if (this.dirY !== -BLOCK_SIZE) moves.push([0, BLOCK_SIZE]);
+            
+            if (moves.length > 0) {
+                const randomMove = moves[Math.floor(Math.random() * moves.length)];
+                this.dirX = randomMove[0];
+                this.dirY = randomMove[1];
+            }
+        }
+    }
+    
+    isSafePosition(x, y) {
+        // Check walls
+        if (x < 0 || x >= GAME_WIDTH || y < 0 || y >= GAME_HEIGHT) return false;
+        
+        // Check self
+        for (const seg of this.segments) {
+            if (seg[0] === x && seg[1] === y) return false;
+        }
+        
+        // Check player snake
+        for (const seg of snake) {
+            if (seg[0] === x && seg[1] === y) return false;
+        }
+        
+        // Check dangerous targets
+        for (const t of targets) {
+            if (t.isActive() && t.occupiesCell(x, y)) return false;
+        }
+        
+        return true;
+    }
+    
+    shoot() {
+        if (!this.alive) return;
+        
+        const head = this.getHead();
+        if (!head) return;
+        
+        // Aim at player with accuracy based on type
+        const playerHead = snake.length > 0 ? snake[snake.length - 1] : null;
+        if (!playerHead) return;
+        
+        let shootDirX = playerHead[0] - head[0];
+        let shootDirY = playerHead[1] - head[1];
+        
+        // Add inaccuracy based on type
+        if (Math.random() > this.typeData.accuracy) {
+            // Miss - shoot in random direction
+            const angle = Math.random() * Math.PI * 2;
+            shootDirX = Math.cos(angle) * 100;
+            shootDirY = Math.sin(angle) * 100;
+        }
+        
+        // Normalize
+        const len = Math.sqrt(shootDirX * shootDirX + shootDirY * shootDirY);
+        if (len > 0) {
+            shootDirX = (shootDirX / len) * BULLET_SPEED;
+            shootDirY = (shootDirY / len) * BULLET_SPEED;
+        }
+        
+        // Create enemy bullet
+        enemyBullets.push({
+            x: head[0] + BLOCK_SIZE / 2,
+            y: head[1] + BLOCK_SIZE / 2,
+            vx: shootDirX,
+            vy: shootDirY,
+            color: this.typeData.color
+        });
+        
+        sound.playShoot();
+    }
+    
+    die(reason = 'unknown') {
+        console.log('>>> ENEMY DIED! Reason:', reason, 'Type:', this.type, 'Position:', this.getHead());
+        this.alive = false;
+        // Spawn particles
+        const head = this.getHead();
+        if (head) {
+            spawnParticles(head[0] + BLOCK_SIZE/2, head[1] + BLOCK_SIZE/2, 30, this.typeData.color);
+        }
+        sound.playExplosion();
+    }
+    
+    draw() {
+        if (!this.alive) return;
+        
+        // Spawn animation - blink
+        if (this.spawnAnimation > 0 && Math.floor(this.spawnAnimation / 3) % 2 === 0) {
+            return;
+        }
+        
+        for (let i = 0; i < this.segments.length; i++) {
+            const segment = this.segments[i];
+            const isHead = i === this.segments.length - 1;
+            const progress = i / Math.max(this.segments.length - 1, 1);
+            
+            // Color gradient from tail to head
+            const baseColor = this.typeData.color;
+            const alpha = 0.5 + progress * 0.5;
+            
+            if (isHead) {
+                // Draw glow
+                ctx.fillStyle = this.typeData.glowColor;
+                ctx.beginPath();
+                ctx.arc(segment[0] + BLOCK_SIZE/2, segment[1] + BLOCK_SIZE/2, BLOCK_SIZE/2 + 4, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.fillStyle = this.typeData.headColor;
+            } else {
+                ctx.fillStyle = hexToRgba(baseColor, alpha);
+            }
+            
+            roundRect(segment[0] + 1, segment[1] + 1, BLOCK_SIZE - 2, BLOCK_SIZE - 2, 6);
+            
+            // Eyes on head
+            if (isHead) {
+                this.drawEyes(segment[0], segment[1]);
+            }
+        }
+        
+        // Draw type indicator above head
+        const head = this.getHead();
+        if (head) {
+            ctx.fillStyle = this.typeData.color;
+            ctx.font = 'bold 10px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(this.typeData.name, head[0] + BLOCK_SIZE/2, head[1] - 5);
+        }
+    }
+    
+    drawEyes(x, y) {
+        const eyeSize = 5;
+        const pupilSize = 3;
+        let eye1X, eye1Y, eye2X, eye2Y;
+        
+        if (this.dirX > 0) {
+            eye1X = x + BLOCK_SIZE - 7; eye1Y = y + 4;
+            eye2X = x + BLOCK_SIZE - 7; eye2Y = y + BLOCK_SIZE - 9;
+        } else if (this.dirX < 0) {
+            eye1X = x + 2; eye1Y = y + 4;
+            eye2X = x + 2; eye2Y = y + BLOCK_SIZE - 9;
+        } else if (this.dirY > 0) {
+            eye1X = x + 4; eye1Y = y + BLOCK_SIZE - 7;
+            eye2X = x + BLOCK_SIZE - 9; eye2Y = y + BLOCK_SIZE - 7;
+        } else {
+            eye1X = x + 4; eye1Y = y + 2;
+            eye2X = x + BLOCK_SIZE - 9; eye2Y = y + 2;
+        }
+        
+        // Red eyes for enemy
+        ctx.fillStyle = '#ff0000';
+        ctx.beginPath();
+        ctx.arc(eye1X + eyeSize/2, eye1Y + eyeSize/2, eyeSize/2, 0, Math.PI * 2);
+        ctx.arc(eye2X + eyeSize/2, eye2Y + eyeSize/2, eyeSize/2, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.arc(eye1X + eyeSize/2 + 0.5, eye1Y + eyeSize/2 + 0.5, pupilSize/2, 0, Math.PI * 2);
+        ctx.arc(eye2X + eyeSize/2 + 0.5, eye2Y + eyeSize/2 + 0.5, pupilSize/2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// Spawn a random enemy snake
+function spawnEnemySnake() {
+    console.log('spawnEnemySnake called. Current enemy:', enemySnake, 'alive:', enemySnake?.alive);
+    if (enemySnake && enemySnake.alive) {
+        console.log('Enemy already exists and alive, skipping spawn');
+        return; // Only one enemy at a time
+    }
+    
+    // Choose type based on spawn chances
+    const roll = Math.random() * 100;
+    let type;
+    
+    if (roll < ENEMY_TYPES.SMART.spawnChance) {
+        type = 'SMART';
+    } else if (roll < ENEMY_TYPES.SMART.spawnChance + ENEMY_TYPES.MEDIUM.spawnChance) {
+        type = 'MEDIUM';
+    } else {
+        type = 'DUMB';
+    }
+    
+    console.log('Creating enemy snake of type:', type, 'with length:', snakeLength);
+    // Create enemy with player's current length
+    enemySnake = new EnemySnake(type, snakeLength);
+    console.log('Enemy snake created:', enemySnake);
+}
+
+// Update enemy bullets
+function updateEnemyBullets() {
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        const b = enemyBullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+        
+        // Remove if out of bounds
+        if (b.x < 0 || b.x > GAME_WIDTH || b.y < 0 || b.y > GAME_HEIGHT) {
+            enemyBullets.splice(i, 1);
+            continue;
+        }
+        
+        // Check collision with player snake
+        for (const seg of snake) {
+            const dx = b.x - (seg[0] + BLOCK_SIZE/2);
+            const dy = b.y - (seg[1] + BLOCK_SIZE/2);
+            if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
+                // Player hit! Game over
+                enemyBullets.splice(i, 1);
+                endGame();
+                return;
+            }
+        }
+        
+        // Check collision with targets (enemy can hit targets too)
+        for (let j = targets.length - 1; j >= 0; j--) {
+            if (checkLineCollision({x: b.x, y: b.y, vx: b.vx, vy: b.vy}, targets[j].x, targets[j].y, targets[j].getPixelSize())) {
+                const t = targets[j];
+                spawnParticles(t.x + t.getPixelSize()/2, t.y + t.getPixelSize()/2, 15, TARGET_TYPES[t.type].color);
+                sound.playExplosion();
+                
+                // Enemy snake grows
+                if (enemySnake && enemySnake.alive) {
+                    enemySnake.length += TARGET_TYPES[t.type].points * t.gridSize;
+                }
+                
+                targets.splice(j, 1);
+                enemyBullets.splice(i, 1);
+                break;
+            }
+        }
+    }
+}
+
+// Draw enemy bullets
+function drawEnemyBullets() {
+    for (const b of enemyBullets) {
+        // Glow
+        ctx.fillStyle = `rgba(255, 100, 100, 0.6)`;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Core
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Highlight
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.beginPath();
+        ctx.arc(b.x - 1, b.y - 1, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// ==========================================
 // HELPER FUNCTIONS
 // ==========================================
 function hexToRgba(hex, alpha) {
@@ -875,7 +1458,7 @@ function spawnParticles(x, y, count, color) {
 // ==========================================
 function initGame() {
     // Stop all music
-    sound.stopMusic();
+    sound.stopAllMusic();
     musicTempo = 1.0;
     
     snake = [];
@@ -913,6 +1496,12 @@ function initGame() {
     shrinkTargets = [];
     speedTargets = [];
     targetSpawnTimer = 0;
+    
+    // Reset enemy snake
+    enemySnake = null;
+    enemyBullets = [];
+    enemySpawnTimer = 0;
+    nextEnemySpawnTime = 120 + Math.floor(Math.random() * 60); // Random 10-15 seconds
     
     updateStats();
     
@@ -1141,6 +1730,16 @@ function update() {
         }
     }
     
+    // Enemy snake collision
+    if (enemySnake && enemySnake.alive && enemySnake.spawnAnimation <= 0) {
+        for (const seg of enemySnake.segments) {
+            if (seg[0] === snakeX && seg[1] === snakeY) {
+                endGame();
+                return;
+            }
+        }
+    }
+    
     // Add new head
     snake.push([snakeX, snakeY]);
     
@@ -1315,6 +1914,58 @@ function update() {
         if (particles[i].isDead()) particles.splice(i, 1);
     }
     
+    // Enemy snake spawning (random interval 10-15 seconds)
+    enemySpawnTimer++;
+    
+    // Debug: log timer progress every 60 frames (5 seconds)
+    if (enemySpawnTimer % 60 === 0) {
+        console.log('Enemy spawn timer:', enemySpawnTimer, '/', nextEnemySpawnTime, 'Enemy exists:', !!enemySnake);
+    }
+    
+    if (enemySpawnTimer >= nextEnemySpawnTime) {
+        console.log('>>> ENEMY SPAWN TRIGGERED! Timer:', enemySpawnTimer, 'Target:', nextEnemySpawnTime);
+        spawnEnemySnake();
+        enemySpawnTimer = 0;
+        // Set next spawn time randomly between 10-15 seconds (120-180 frames)
+        nextEnemySpawnTime = 120 + Math.floor(Math.random() * 60);
+        console.log('>>> Next spawn time set to:', nextEnemySpawnTime);
+    }
+    
+    // Update enemy snake
+    if (enemySnake) {
+        if (enemySnake.alive) {
+            enemySnake.update();
+        } else {
+            // Remove dead enemy snake after a delay
+            enemySnake = null;
+        }
+    }
+    
+    // Update enemy bullets
+    updateEnemyBullets();
+    
+    // Check if player bullet hits enemy snake
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        if (enemySnake && enemySnake.alive) {
+            for (const seg of enemySnake.segments) {
+                const dx = bullets[i].x - (seg[0] + BLOCK_SIZE/2);
+                const dy = bullets[i].y - (seg[1] + BLOCK_SIZE/2);
+                if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
+                    // Hit enemy snake - kill it!
+                    enemySnake.die();
+                    bullets.splice(i, 1);
+                    score += 5; // Bonus for killing enemy
+                    if (score > highScore) {
+                        highScore = score;
+                        newRecordThisGame = true;
+                        localStorage.setItem('fireSnakeHighScore', highScore.toString());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    
     updateStats();
 }
 
@@ -1385,12 +2036,26 @@ function draw() {
         for (const spt of speedTargets) spt.draw();
         drawFood();
         drawSnake();
+        
+        // Draw enemy snake
+        if (enemySnake && enemySnake.alive) {
+            enemySnake.draw();
+        }
+        
+        // Draw bullets
         for (const b of bullets) b.draw();
+        drawEnemyBullets();
+        
         for (const p of particles) p.draw();
         
         // Effect indicators
         if (slowdownTimer > 0) drawEffectBar(slowdownTimer, SLOWDOWN_DURATION, COLORS.slowTarget, 'SLOWED');
         if (speedupTimer > 0) drawEffectBar(speedupTimer, SPEEDUP_DURATION, COLORS.speedTarget, 'SPEED x2');
+        
+        // Enemy warning
+        if (enemySnake && enemySnake.alive) {
+            drawEnemyWarning();
+        }
         
         // Food timer
         drawFoodTimer();
@@ -1580,6 +2245,21 @@ function drawFoodTimer() {
         ctx.fillStyle = hexToRgba(color, alpha);
         ctx.fillRect(barX, barY, barWidth * progress, barHeight);
     }
+}
+
+function drawEnemyWarning() {
+    if (!enemySnake || !enemySnake.alive) return;
+    
+    const type = enemySnake.typeData;
+    
+    // Warning bar at top of screen
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    roundRect(GAME_WIDTH / 2 - 100, 40, 200, 30, 8);
+    
+    ctx.fillStyle = type.color;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(`⚠ ENEMY: ${type.name.toUpperCase()} SNAKE ⚠`, GAME_WIDTH / 2, 60);
 }
 
 function drawStartScreen() {
