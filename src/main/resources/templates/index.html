@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fire Snake Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3a 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            overflow: auto;
+            padding: 10px;
+        }
+        
+        .game-container {
+            display: flex;
+            gap: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 0 60px rgba(0, 255, 150, 0.3);
+            max-height: 95vh;
+            max-width: 98vw;
+        }
+        
+        #gameCanvas {
+            display: block;
+            border: 3px solid rgba(0, 255, 150, 0.5);
+            border-right: none;
+            max-height: 95vh;
+            width: auto;
+            height: auto;
+        }
+        
+        #statsPanel {
+            width: 220px;
+            background: linear-gradient(180deg, #0a0a19 0%, #101025 100%);
+            border: 3px solid rgba(0, 255, 150, 0.5);
+            padding: 20px;
+            color: white;
+        }
+        
+        .stat-title {
+            color: #00ff96;
+            font-size: 24px;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 20px;
+            text-shadow: 0 0 20px rgba(0, 255, 150, 0.5);
+        }
+        
+        .stat-item {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: rgba(0, 255, 150, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(0, 255, 150, 0.2);
+        }
+        
+        .stat-label {
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        
+        .stat-value {
+            color: #fff;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        
+        .stat-value.score {
+            color: #00ff96;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+        }
+        
+        .stat-value.highscore {
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        }
+        
+        .controls {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            font-size: 11px;
+            line-height: 1.8;
+        }
+        
+        .controls h3 {
+            color: #00ff96;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        
+        .key {
+            display: inline-block;
+            background: rgba(0, 255, 150, 0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            color: #00ff96;
+        }
+        
+        .legend {
+            margin-top: 15px;
+            font-size: 10px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+        }
+        
+        .legend-shape {
+            width: 16px;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .shape-square {
+            background: #ffc832;
+            border-radius: 2px;
+        }
+        
+        .shape-circle {
+            background: #6496ff;
+            border-radius: 50%;
+        }
+        
+        .shape-triangle {
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 14px solid #ff3232;
+        }
+        
+        .shape-diamond {
+            background: #ff9600;
+            transform: rotate(45deg);
+            width: 12px;
+            height: 12px;
+        }
+        
+        .shape-food {
+            background: #ff3264;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <canvas id="gameCanvas" width="800" height="800"></canvas>
+        <div id="statsPanel">
+            <div class="stat-title">FIRE SNAKE</div>
+            
+            <div class="stat-item">
+                <div class="stat-label">Score</div>
+                <div class="stat-value score" id="scoreValue">0</div>
+            </div>
+            
+            <div class="stat-item">
+                <div class="stat-label">High Score</div>
+                <div class="stat-value highscore" id="highScoreValue">0</div>
+            </div>
+            
+            <div class="stat-item">
+                <div class="stat-label">Length</div>
+                <div class="stat-value" id="lengthValue">1</div>
+            </div>
+            
+            <div class="stat-item">
+                <div class="stat-label">Targets Hit</div>
+                <div class="stat-value" id="targetsValue">0</div>
+            </div>
+            
+            <div class="controls">
+                <h3>Controls</h3>
+                <span class="key">SPACE</span> Start / Shoot<br>
+                <span class="key">↑↓←→</span> Move<br>
+                <span class="key">WASD</span> Move<br>
+                <span class="key">BACKSPACE</span> Mute<br>
+                <span class="key">R</span> Restart
+            </div>
+            
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-shape shape-food"></div>
+                    <span>Food (+1 length)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-shape shape-square"></div>
+                    <span>Target (shoot!)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-shape shape-circle"></div>
+                    <span>Slow (2x slower)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-shape"><div class="shape-triangle"></div></div>
+                    <span>Shrink (÷2 length)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-shape"><div class="shape-diamond"></div></div>
+                    <span>Speed (2x faster)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/js/game.js"></script>
+</body>
+</html>
