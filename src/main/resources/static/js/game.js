@@ -62,6 +62,7 @@ let highScore = parseInt(localStorage.getItem('fireSnakeHighScore') || '0');
 let gameOver = false;
 let gameStarted = false;
 let gamePaused = false;
+let newRecordThisGame = false; // Track if record was beaten this game
 
 // Timers and effects
 let slowdownTimer = 0;
@@ -105,20 +106,24 @@ const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 let musicTempo = 1.0;
 
 // ==========================================
-// SOUND ENGINE (8-bit style with 80s/90s melodies)
+// SOUND ENGINE with MIDI support
 // ==========================================
 class SoundEngine {
     constructor() {
         this.ctx = audioCtx;
-        this.menuMusicPlaying = false;
-        this.gameMusicPlaying = false;
-        this.menuMusicTimeouts = [];
-        this.gameMusicTimeouts = [];
-        this.menuMusicInterval = null;
-        this.gameMusicInterval = null;
-        this.currentNoteIndex = 0;
+        this.currentMusic = null;
+        this.musicPlaying = false;
+        
+        // MIDI file paths
+        this.MUSIC = {
+            menu: '/music/entertainer.mid',
+            game: '/music/macarena.mid',
+            gameOverLose: '/music/requiem.mid',
+            gameOverWin: '/music/we are the champions.mid'
+        };
     }
     
+    // ========== SOUND EFFECTS (8-bit style) ==========
     playTone(frequency, duration, type = 'square', volume = 0.3) {
         if (soundMuted) return;
         try {
@@ -218,199 +223,102 @@ class SoundEngine {
         this.playSweep(400, 1500, 0.2, 0.2);
     }
     
-    playGameOver() {
-        this.stopGameMusic();
-        setTimeout(() => this.playTone(400, 0.15, 'square', 0.3), 0);
-        setTimeout(() => this.playTone(300, 0.15, 'square', 0.3), 150);
-        setTimeout(() => this.playTone(200, 0.3, 'square', 0.3), 300);
-    }
-    
-    playNewRecord() {
-        const notes = [
-            { freq: 523, delay: 0 },
-            { freq: 659, delay: 80 },
-            { freq: 784, delay: 160 },
-            { freq: 1047, delay: 240 },
-            { freq: 784, delay: 320 },
-            { freq: 1047, delay: 400 },
-            { freq: 1319, delay: 500 },
-            { freq: 1568, delay: 650 },
-        ];
-        notes.forEach(n => {
-            setTimeout(() => this.playTone(n.freq, n.delay < 500 ? 0.12 : 0.4, 'square', 0.25), n.delay);
-        });
-    }
-    
-    // ========== MENU MUSIC (80s/90s Synth Style) ==========
-    playMenuMusic() {
-        if (this.menuMusicPlaying || soundMuted) return;
-        this.menuMusicPlaying = true;
+    // ========== MIDI MUSIC PLAYBACK ==========
+    playMidi(filePath, loop = true) {
+        if (soundMuted) return;
         
-        if (this.ctx.state === 'suspended') {
-            this.ctx.resume();
-        }
-        
-        // 80s/90s style catchy synth melody (like Tetris/Contra vibes)
-        const melody = [
-            // Part A - Catchy intro
-            { freq: 330, dur: 150 },  // E4
-            { freq: 392, dur: 150 },  // G4
-            { freq: 494, dur: 150 },  // B4
-            { freq: 659, dur: 300 },  // E5
-            { freq: 587, dur: 150 },  // D5
-            { freq: 494, dur: 150 },  // B4
-            { freq: 440, dur: 300 },  // A4
-            { freq: 0, dur: 150 },    // pause
+        try {
+            // Stop any currently playing music
+            this.stopMusic();
             
-            // Part B
-            { freq: 330, dur: 150 },  // E4
-            { freq: 392, dur: 150 },  // G4
-            { freq: 494, dur: 150 },  // B4
-            { freq: 587, dur: 300 },  // D5
-            { freq: 523, dur: 150 },  // C5
-            { freq: 494, dur: 150 },  // B4
-            { freq: 392, dur: 300 },  // G4
-            { freq: 0, dur: 150 },    // pause
+            this.currentMusic = filePath;
+            this.musicPlaying = true;
             
-            // Part C - Bridge
-            { freq: 523, dur: 200 },  // C5
-            { freq: 587, dur: 200 },  // D5
-            { freq: 659, dur: 200 },  // E5
-            { freq: 587, dur: 200 },  // D5
-            { freq: 523, dur: 200 },  // C5
-            { freq: 494, dur: 200 },  // B4
-            { freq: 440, dur: 400 },  // A4
-            { freq: 0, dur: 200 },    // pause
-            
-            // Part D - Resolution
-            { freq: 392, dur: 150 },  // G4
-            { freq: 440, dur: 150 },  // A4
-            { freq: 494, dur: 150 },  // B4
-            { freq: 523, dur: 300 },  // C5
-            { freq: 494, dur: 150 },  // B4
-            { freq: 440, dur: 150 },  // A4
-            { freq: 392, dur: 400 },  // G4
-            { freq: 0, dur: 300 },    // pause
-        ];
-        
-        let noteIndex = 0;
-        let totalTime = 0;
-        
-        const playNextNote = () => {
-            if (!this.menuMusicPlaying || soundMuted) return;
-            
-            const note = melody[noteIndex];
-            if (note.freq > 0) {
-                this.playTone(note.freq, note.dur / 1000, 'square', 0.25);
+            // Use MIDIjs library
+            if (typeof MIDIjs !== 'undefined') {
+                MIDIjs.play(filePath);
+                
+                // Handle looping
+                if (loop) {
+                    MIDIjs.player_callback = (event) => {
+                        if (event.time === 0 && this.musicPlaying && this.currentMusic === filePath) {
+                            // Song ended, replay if still should be playing
+                            setTimeout(() => {
+                                if (this.musicPlaying && this.currentMusic === filePath && !soundMuted) {
+                                    MIDIjs.play(filePath);
+                                }
+                            }, 500);
+                        }
+                    };
+                }
             }
-            
-            noteIndex = (noteIndex + 1) % melody.length;
-            
-            const timeout = setTimeout(playNextNote, note.dur);
-            this.menuMusicTimeouts.push(timeout);
-        };
+        } catch (e) {
+            console.error('Error playing MIDI:', e);
+        }
+    }
+    
+    stopMusic() {
+        this.musicPlaying = false;
+        this.currentMusic = null;
         
-        playNextNote();
+        try {
+            if (typeof MIDIjs !== 'undefined') {
+                MIDIjs.stop();
+            }
+        } catch (e) {}
+    }
+    
+    // ========== MUSIC CONTROL FUNCTIONS ==========
+    playMenuMusic() {
+        if (soundMuted) return;
+        this.playMidi(this.MUSIC.menu, true);
     }
     
     stopMenuMusic() {
-        this.menuMusicPlaying = false;
-        this.menuMusicTimeouts.forEach(t => clearTimeout(t));
-        this.menuMusicTimeouts = [];
-        if (this.menuMusicInterval) {
-            clearInterval(this.menuMusicInterval);
-            this.menuMusicInterval = null;
+        if (this.currentMusic === this.MUSIC.menu) {
+            this.stopMusic();
         }
     }
     
-    // ========== GAME MUSIC (80s/90s Action Style) ==========
     playGameMusic() {
-        if (this.gameMusicPlaying || soundMuted) return;
-        this.gameMusicPlaying = true;
-        
-        if (this.ctx.state === 'suspended') {
-            this.ctx.resume();
-        }
-        
-        // Action-style 80s/90s game music (faster, more intense)
-        const melody = [
-            // Driving bass line with melody
-            { freq: 165, dur: 100 },  // E3 bass
-            { freq: 330, dur: 100 },  // E4
-            { freq: 165, dur: 100 },  // E3 bass
-            { freq: 392, dur: 100 },  // G4
-            { freq: 165, dur: 100 },  // E3 bass
-            { freq: 440, dur: 100 },  // A4
-            { freq: 165, dur: 100 },  // E3 bass
-            { freq: 392, dur: 100 },  // G4
-            
-            { freq: 196, dur: 100 },  // G3 bass
-            { freq: 392, dur: 100 },  // G4
-            { freq: 196, dur: 100 },  // G3 bass
-            { freq: 494, dur: 100 },  // B4
-            { freq: 196, dur: 100 },  // G3 bass
-            { freq: 523, dur: 100 },  // C5
-            { freq: 196, dur: 100 },  // G3 bass
-            { freq: 494, dur: 100 },  // B4
-            
-            { freq: 220, dur: 100 },  // A3 bass
-            { freq: 440, dur: 100 },  // A4
-            { freq: 220, dur: 100 },  // A3 bass
-            { freq: 523, dur: 100 },  // C5
-            { freq: 220, dur: 100 },  // A3 bass
-            { freq: 587, dur: 100 },  // D5
-            { freq: 220, dur: 100 },  // A3 bass
-            { freq: 523, dur: 100 },  // C5
-            
-            { freq: 247, dur: 100 },  // B3 bass
-            { freq: 494, dur: 100 },  // B4
-            { freq: 247, dur: 100 },  // B3 bass
-            { freq: 587, dur: 100 },  // D5
-            { freq: 247, dur: 100 },  // B3 bass
-            { freq: 659, dur: 150 },  // E5
-            { freq: 587, dur: 150 },  // D5
-            { freq: 494, dur: 100 },  // B4
-        ];
-        
-        let noteIndex = 0;
-        
-        const playNextNote = () => {
-            if (!this.gameMusicPlaying || soundMuted) return;
-            
-            const note = melody[noteIndex];
-            const adjustedDur = note.dur / musicTempo;
-            
-            if (note.freq > 0) {
-                // Lower notes (bass) quieter
-                const vol = note.freq < 300 ? 0.15 : 0.2;
-                this.playTone(note.freq, (note.dur / 1000) / musicTempo, 'square', vol);
-            }
-            
-            noteIndex = (noteIndex + 1) % melody.length;
-            
-            const timeout = setTimeout(playNextNote, adjustedDur);
-            this.gameMusicTimeouts.push(timeout);
-        };
-        
-        playNextNote();
+        if (soundMuted) return;
+        this.playMidi(this.MUSIC.game, true);
     }
     
     stopGameMusic() {
-        this.gameMusicPlaying = false;
-        this.gameMusicTimeouts.forEach(t => clearTimeout(t));
-        this.gameMusicTimeouts = [];
-        if (this.gameMusicInterval) {
-            clearInterval(this.gameMusicInterval);
-            this.gameMusicInterval = null;
+        if (this.currentMusic === this.MUSIC.game) {
+            this.stopMusic();
         }
     }
     
-    // Update music tempo based on snake length
+    playGameOverMusic(beatRecord) {
+        if (soundMuted) return;
+        
+        this.stopMusic();
+        
+        if (beatRecord) {
+            // Play "We Are The Champions"
+            this.playMidi(this.MUSIC.gameOverWin, false);
+        } else {
+            // Play "Requiem"
+            this.playMidi(this.MUSIC.gameOverLose, false);
+        }
+    }
+    
+    // Mute/unmute all
+    setMuted(muted) {
+        soundMuted = muted;
+        if (muted) {
+            this.stopMusic();
+        }
+    }
+    
+    // Update music tempo based on snake length (for future use with custom music)
     updateMusicTempo(snakeLen) {
-        // Every 10 blocks, increase tempo by 10%
+        // MIDI playback speed is controlled by the MIDI file itself
+        // This is kept for compatibility but doesn't affect MIDI files
         const speedLevel = Math.floor(snakeLen / 10);
         musicTempo = 1.0 + (speedLevel * 0.1);
-        // Cap at 2x speed
         if (musicTempo > 2.0) musicTempo = 2.0;
     }
 }
@@ -967,8 +875,7 @@ function spawnParticles(x, y, count, color) {
 // ==========================================
 function initGame() {
     // Stop all music
-    sound.stopMenuMusic();
-    sound.stopGameMusic();
+    sound.stopMusic();
     musicTempo = 1.0;
     
     snake = [];
@@ -995,6 +902,7 @@ function initGame() {
     
     gameOver = false;
     gameStarted = false;
+    newRecordThisGame = false;
     spacePressed = false;
     autoFireCooldown = 0;
     
@@ -1245,8 +1153,8 @@ function update() {
         sound.updateMusicTempo(snakeLength);
         if (score > highScore) {
             highScore = score;
+            newRecordThisGame = true;
             localStorage.setItem('fireSnakeHighScore', highScore.toString());
-            sound.playNewRecord();
         }
         sound.playEat();
         spawnFood();
@@ -1313,8 +1221,8 @@ function update() {
                 sound.updateMusicTempo(snakeLength);
                 if (score > highScore) {
                     highScore = score;
+                    newRecordThisGame = true;
                     localStorage.setItem('fireSnakeHighScore', highScore.toString());
-                    sound.playNewRecord();
                 }
                 targetsHit++;
                 targets.splice(j, 1);
@@ -1412,7 +1320,10 @@ function update() {
 
 function endGame() {
     gameOver = true;
-    sound.playGameOver();
+    sound.stopGameMusic();
+    
+    // Play appropriate game over music
+    sound.playGameOverMusic(newRecordThisGame);
 }
 
 // ==========================================
