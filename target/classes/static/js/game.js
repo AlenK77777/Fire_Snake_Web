@@ -1,7 +1,21 @@
 // ==========================================
 // FIRE SNAKE GAME - Web Version
 // Port of the Java Swing game to HTML5 Canvas
+// Version: 2.0.0 (Cache-busted)
 // ==========================================
+
+// Force cache clear on load
+if ('caches' in window) {
+    caches.keys().then(function(names) {
+        for (let name of names) {
+            caches.delete(name);
+        }
+    });
+}
+
+// Log version to console for debugging
+console.log('%cFire Snake Game v2.0.0', 'color: #00ff96; font-size: 16px; font-weight: bold;');
+console.log('Cache cleared. Fresh version loaded at:', new Date().toLocaleString());
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
@@ -56,21 +70,37 @@ let snakeLength = 1;
 let snakeX, snakeY;
 let dirX = 0, dirY = 0;
 let nextDirX = 0, nextDirY = 0;
-let foodX, foodY;
 let score = 0;
 let highScore = parseInt(localStorage.getItem('fireSnakeHighScore') || '0');
 let gameOver = false;
 let gameStarted = false;
 let gamePaused = false;
 let newRecordThisGame = false; // Track if record was beaten this game
+let gameLoaded = false; // Track if game is loaded (music ready)
+let lifeLostThisFrame = false; // Prevent multiple life losses in one frame
+let invincibilityTimer = 0; // Invincibility period after respawn (in frames)
+const INVINCIBILITY_DURATION = 48; // 4 seconds at 12 FPS - longer to ensure safe respawn
+
+// Lives system
+let lives = 3;
+// No max lives limit - collect as many as you can!
+
+// Food (multiple items with varying sizes)
+let foods = []; // Array of food items: {x, y, size, timer}
+const MAX_FOOD_ITEMS = 5;
+const FOOD_TIME_LIMIT = 180; // 15 seconds at 12 FPS
+
+// Heart pickups (extra lives)
+let hearts = []; // Array of heart items: {x, y, timer}
+let heartSpawnTimer = 0;
+const HEART_SPAWN_INTERVAL = 1440; // ~2 minutes at 12 FPS (120 sec * 12)
+const HEART_LIFETIME = 60; // 5 seconds at 12 FPS
 
 // Timers and effects
 let slowdownTimer = 0;
 let speedupTimer = 0;
 const SLOWDOWN_DURATION = 120;
 const SPEEDUP_DURATION = 240;
-let foodTimer = 0;
-const FOOD_TIME_LIMIT = 120;
 
 // Statistics
 let targetsHit = 0;
@@ -99,10 +129,10 @@ const ENEMY_TYPES = {
         color: '#d4a574',        // Beige
         headColor: '#c9956c',
         glowColor: 'rgba(212, 165, 116, 0.5)',
-        accuracy: 0.2,          // 20% accuracy
-        moveAccuracy: 0.5,      // 50% chance to make correct move
-        crashChance: 0.002,     // 0.2% chance to crash each frame (was 3% - way too high!)
-        shootInterval: 30,      // Shoots every 2.5 seconds
+        accuracy: 0.3,          // 30% accuracy (improved)
+        moveAccuracy: 0.7,      // 70% chance to make correct move (improved from 50%)
+        crashChance: 0.0,       // No random crashes - only crash on collision
+        shootInterval: 36,      // Shoots every 3 seconds
         spawnChance: 50         // 50% chance to spawn this type
     },
     MEDIUM: {
@@ -111,9 +141,9 @@ const ENEMY_TYPES = {
         headColor: '#ffec00',
         glowColor: 'rgba(255, 215, 0, 0.5)',
         accuracy: 0.5,          // 50% accuracy
-        moveAccuracy: 0.75,     // 75% correct moves
-        crashChance: 0.001,     // 0.1% crash chance (was 1%)
-        shootInterval: 20,      // Shoots every ~1.7 seconds
+        moveAccuracy: 0.85,     // 85% correct moves (improved)
+        crashChance: 0.0,       // No random crashes
+        shootInterval: 24,      // Shoots every 2 seconds
         spawnChance: 35         // 35% chance
     },
     SMART: {
@@ -123,7 +153,7 @@ const ENEMY_TYPES = {
         glowColor: 'rgba(255, 68, 68, 0.5)',
         accuracy: 0.85,         // 85% accuracy
         moveAccuracy: 0.95,     // 95% correct moves
-        crashChance: 0.0005,    // 0.05% crash chance (was 0.2%)
+        crashChance: 0.0,       // No random crashes
         shootInterval: 12,      // Shoots every second
         spawnChance: 15         // 15% chance
     }
@@ -1091,10 +1121,21 @@ class EnemySnake {
         // Add new head
         this.segments.push([newX, newY]);
         
-        // Check if enemy eats food
-        if (newX === foodX && newY === foodY) {
-            this.length++;
-            spawnFood(); // Respawn food
+        // Check if enemy eats food (from multiple food items)
+        for (let i = foods.length - 1; i >= 0; i--) {
+            const food = foods[i];
+            for (let fx = 0; fx < food.size; fx++) {
+                for (let fy = 0; fy < food.size; fy++) {
+                    if (newX === food.x + fx * BLOCK_SIZE && newY === food.y + fy * BLOCK_SIZE) {
+                        this.length += food.size;
+                        foods.splice(i, 1);
+                        if (foods.length === 0) {
+                            spawnFoods();
+                        }
+                        break;
+                    }
+                }
+            }
         }
         
         // Remove tail if too long
@@ -1119,57 +1160,52 @@ class EnemySnake {
         const playerHead = snake.length > 0 ? snake[snake.length - 1] : null;
         if (!playerHead) return;
         
-        // Calculate direction to player
-        const dx = playerHead[0] - head[0];
-        const dy = playerHead[1] - head[1];
+        // Get all possible moves (can't reverse direction)
+        const possibleMoves = [];
+        if (this.dirX !== BLOCK_SIZE) possibleMoves.push([-BLOCK_SIZE, 0]);
+        if (this.dirX !== -BLOCK_SIZE) possibleMoves.push([BLOCK_SIZE, 0]);
+        if (this.dirY !== BLOCK_SIZE) possibleMoves.push([0, -BLOCK_SIZE]);
+        if (this.dirY !== -BLOCK_SIZE) possibleMoves.push([0, BLOCK_SIZE]);
         
-        // Decide if making smart move or random move
+        // Filter to only safe moves
+        const safeMoves = possibleMoves.filter(move => {
+            const newX = head[0] + move[0];
+            const newY = head[1] + move[1];
+            return this.isSafePosition(newX, newY);
+        });
+        
+        // If no safe moves, just continue (will die)
+        if (safeMoves.length === 0) {
+            return;
+        }
+        
+        // Decide if making smart move or random safe move
         if (Math.random() < this.typeData.moveAccuracy) {
-            // Smart move - try to get closer to player
-            const possibleMoves = [];
-            
-            // Can't reverse direction
-            if (this.dirX !== BLOCK_SIZE) possibleMoves.push([-BLOCK_SIZE, 0]);
-            if (this.dirX !== -BLOCK_SIZE) possibleMoves.push([BLOCK_SIZE, 0]);
-            if (this.dirY !== BLOCK_SIZE) possibleMoves.push([0, -BLOCK_SIZE]);
-            if (this.dirY !== -BLOCK_SIZE) possibleMoves.push([0, BLOCK_SIZE]);
-            
-            // Score each move
-            let bestMove = [this.dirX, this.dirY];
+            // Smart move - try to get closer to player from safe moves
+            let bestMove = safeMoves[0];
             let bestScore = -Infinity;
             
-            for (const move of possibleMoves) {
+            for (const move of safeMoves) {
                 const newX = head[0] + move[0];
                 const newY = head[1] + move[1];
                 
-                // Check if move is safe
-                if (this.isSafePosition(newX, newY)) {
-                    // Score based on distance to player
-                    const distToPlayer = Math.abs(playerHead[0] - newX) + Math.abs(playerHead[1] - newY);
-                    const score = -distToPlayer; // Closer is better
-                    
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestMove = move;
-                    }
+                // Score based on distance to player
+                const distToPlayer = Math.abs(playerHead[0] - newX) + Math.abs(playerHead[1] - newY);
+                const score = -distToPlayer; // Closer is better
+                
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMove = move;
                 }
             }
             
             this.dirX = bestMove[0];
             this.dirY = bestMove[1];
         } else {
-            // Random move
-            const moves = [];
-            if (this.dirX !== BLOCK_SIZE) moves.push([-BLOCK_SIZE, 0]);
-            if (this.dirX !== -BLOCK_SIZE) moves.push([BLOCK_SIZE, 0]);
-            if (this.dirY !== BLOCK_SIZE) moves.push([0, -BLOCK_SIZE]);
-            if (this.dirY !== -BLOCK_SIZE) moves.push([0, BLOCK_SIZE]);
-            
-            if (moves.length > 0) {
-                const randomMove = moves[Math.floor(Math.random() * moves.length)];
-                this.dirX = randomMove[0];
-                this.dirY = randomMove[1];
-            }
+            // Random SAFE move
+            const randomMove = safeMoves[Math.floor(Math.random() * safeMoves.length)];
+            this.dirX = randomMove[0];
+            this.dirY = randomMove[1];
         }
     }
     
@@ -1366,15 +1402,29 @@ function updateEnemyBullets() {
             continue;
         }
         
+        // CRITICAL: Skip collision checks during invincibility or if life was lost this frame
+        if (invincibilityTimer > 0 || lifeLostThisFrame) {
+            continue;
+        }
+        
         // Check collision with player snake
-        for (const seg of snake) {
-            const dx = b.x - (seg[0] + BLOCK_SIZE/2);
-            const dy = b.y - (seg[1] + BLOCK_SIZE/2);
-            if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
-                // Player hit! Game over
-                enemyBullets.splice(i, 1);
-                endGame();
-                return;
+        // CRITICAL: Skip if snake array is empty (during respawn)
+        if (snake.length > 0) {
+            for (const seg of snake) {
+                const dx = b.x - (seg[0] + BLOCK_SIZE/2);
+                const dy = b.y - (seg[1] + BLOCK_SIZE/2);
+                if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
+                    enemyBullets.splice(i, 1);
+                    console.log('>>> Enemy bullet collision detected at:', b.x, b.y, 'Snake segment:', seg);
+                    if (!loseLife()) {
+                        endGame();
+                    }
+                    return;
+                }
+                // Check flags AFTER checking collision to break loop if life was lost
+                if (lifeLostThisFrame || invincibilityTimer > 0) {
+                    break;
+                }
             }
         }
         
@@ -1456,7 +1506,7 @@ function spawnParticles(x, y, count, color) {
 // ==========================================
 // GAME INITIALIZATION
 // ==========================================
-function initGame() {
+function initGame(resetLives = true) {
     // Stop all music
     sound.stopAllMusic();
     musicTempo = 1.0;
@@ -1471,7 +1521,18 @@ function initGame() {
     nextDirX = 0;
     nextDirY = 0;
     
-    spawnFood();
+    // Reset lives only on full reset
+    if (resetLives) {
+        lives = 3;
+    }
+    
+    // Clear and spawn new food items
+    foods = [];
+    spawnFoods();
+    
+    // Clear hearts
+    hearts = [];
+    heartSpawnTimer = 0;
     
     score = 0;
     targetsHit = 0;
@@ -1479,7 +1540,6 @@ function initGame() {
     foodEaten = 0;
     slowdownTimer = 0;
     speedupTimer = 0;
-    foodTimer = FOOD_TIME_LIMIT;
     currentFPS = NORMAL_FPS;
     frameInterval = 1000 / currentFPS;
     
@@ -1488,6 +1548,8 @@ function initGame() {
     newRecordThisGame = false;
     spacePressed = false;
     autoFireCooldown = 0;
+    invincibilityTimer = 0; // Reset invincibility
+    lifeLostThisFrame = false; // Reset life loss flag
     
     particles = [];
     bullets = [];
@@ -1504,6 +1566,7 @@ function initGame() {
     nextEnemySpawnTime = 120 + Math.floor(Math.random() * 60); // Random 10-15 seconds
     
     updateStats();
+    updateLivesDisplay();
     
     // Start menu music if user has interacted
     if (userHasInteracted && !soundMuted) {
@@ -1513,29 +1576,293 @@ function initGame() {
 
 // Start the actual gameplay
 function startGame() {
-    gameStarted = true;
+    // Show loading screen before transitioning to game
+    showLoadingScreen();
+    
+    // Start game music IMMEDIATELY during loading to overcome delay
     sound.stopMenuMusic();
     if (!soundMuted) {
         sound.playGameMusic();
     }
+    
+    setTimeout(() => {
+        gameStarted = true;
+        hideLoadingScreen();
+    }, 4000);
 }
 
-function spawnFood() {
-    let validPosition;
-    do {
-        validPosition = true;
-        foodX = (Math.floor(Math.random() * ((GAME_WIDTH - BLOCK_SIZE * 2) / BLOCK_SIZE)) + 1) * BLOCK_SIZE;
-        foodY = (Math.floor(Math.random() * ((GAME_HEIGHT - BLOCK_SIZE * 2) / BLOCK_SIZE)) + 1) * BLOCK_SIZE;
-        
-        for (const segment of snake) {
-            if (segment[0] === foodX && segment[1] === foodY) {
-                validPosition = false;
-                break;
+// Check if a position overlaps with any existing game objects
+function isPositionOccupied(x, y, size = 1) {
+    const checkCells = [];
+    for (let dx = 0; dx < size; dx++) {
+        for (let dy = 0; dy < size; dy++) {
+            checkCells.push([x + dx * BLOCK_SIZE, y + dy * BLOCK_SIZE]);
+        }
+    }
+    
+    // Check snake
+    for (const cell of checkCells) {
+        for (const seg of snake) {
+            if (seg[0] === cell[0] && seg[1] === cell[1]) return true;
+        }
+    }
+    
+    // Check existing foods
+    for (const food of foods) {
+        for (const cell of checkCells) {
+            for (let fx = 0; fx < food.size; fx++) {
+                for (let fy = 0; fy < food.size; fy++) {
+                    if (food.x + fx * BLOCK_SIZE === cell[0] && food.y + fy * BLOCK_SIZE === cell[1]) return true;
+                }
             }
         }
-    } while (!validPosition);
+    }
     
-    foodTimer = FOOD_TIME_LIMIT;
+    // Check hearts
+    for (const heart of hearts) {
+        for (const cell of checkCells) {
+            if (heart.x === cell[0] && heart.y === cell[1]) return true;
+        }
+    }
+    
+    // Check targets
+    for (const t of targets) {
+        for (const cell of checkCells) {
+            if (t.occupiesCell(cell[0], cell[1])) return true;
+        }
+    }
+    for (const t of slowTargets) {
+        for (const cell of checkCells) {
+            if (t.occupiesCell(cell[0], cell[1])) return true;
+        }
+    }
+    for (const t of shrinkTargets) {
+        for (const cell of checkCells) {
+            if (t.occupiesCell(cell[0], cell[1])) return true;
+        }
+    }
+    for (const t of speedTargets) {
+        for (const cell of checkCells) {
+            if (t.occupiesCell(cell[0], cell[1])) return true;
+        }
+    }
+    
+    return false;
+}
+
+// Spawn multiple food items with varying sizes
+function spawnFoods() {
+    const numFoods = 1 + Math.floor(Math.random() * MAX_FOOD_ITEMS); // 1-5 foods
+    
+    for (let i = 0; i < numFoods; i++) {
+        spawnSingleFood();
+    }
+}
+
+function spawnSingleFood() {
+    // Random size: 1x1 (60%), 2x2 (25%), 3x3 (15%)
+    const sizeRoll = Math.random() * 100;
+    let size;
+    if (sizeRoll < 60) size = 1;
+    else if (sizeRoll < 85) size = 2;
+    else size = 3;
+    
+    let attempts = 0;
+    const maxAttempts = 50;
+    
+    while (attempts < maxAttempts) {
+        const maxX = Math.floor((GAME_WIDTH - BLOCK_SIZE * (size + 1)) / BLOCK_SIZE);
+        const maxY = Math.floor((GAME_HEIGHT - BLOCK_SIZE * (size + 1)) / BLOCK_SIZE);
+        const x = (Math.floor(Math.random() * maxX) + 1) * BLOCK_SIZE;
+        const y = (Math.floor(Math.random() * maxY) + 1) * BLOCK_SIZE;
+        
+        if (!isPositionOccupied(x, y, size)) {
+            foods.push({
+                x: x,
+                y: y,
+                size: size,
+                timer: FOOD_TIME_LIMIT + Math.random() * 60, // Slight variation in timer
+                pulse: Math.random() * Math.PI * 2
+            });
+            return;
+        }
+        attempts++;
+    }
+}
+
+// Spawn a heart pickup (extra life)
+function spawnHeart() {
+    // Only one heart on screen at a time
+    if (hearts.length > 0) return;
+    
+    let attempts = 0;
+    const maxAttempts = 50;
+    
+    while (attempts < maxAttempts) {
+        const x = (Math.floor(Math.random() * ((GAME_WIDTH - BLOCK_SIZE * 2) / BLOCK_SIZE)) + 1) * BLOCK_SIZE;
+        const y = (Math.floor(Math.random() * ((GAME_HEIGHT - BLOCK_SIZE * 2) / BLOCK_SIZE)) + 1) * BLOCK_SIZE;
+        
+        if (!isPositionOccupied(x, y, 1)) {
+            hearts.push({
+                x: x,
+                y: y,
+                timer: HEART_LIFETIME, // 5 seconds at 12 FPS
+                pulse: 0
+            });
+            return;
+        }
+        attempts++;
+    }
+}
+
+// Update lives display in HTML
+function updateLivesDisplay() {
+    const livesDisplay = document.getElementById('livesDisplay');
+    if (livesDisplay) {
+        let html = '';
+        // Show all current lives (no limit)
+        for (let i = 0; i < lives; i++) {
+            html += '<span class="heart">❤</span>';
+        }
+        // If no lives, show empty hearts for visual feedback
+        if (lives === 0) {
+            html = '<span class="heart lost">❤</span>';
+        }
+        livesDisplay.innerHTML = html;
+    }
+}
+
+// Lose a life (returns true if game should continue, false if game over)
+// Find safe respawn position (maximally distant from death location)
+function findSafeRespawnPosition(deathX, deathY) {
+    let bestX = GAME_WIDTH / 2;
+    let bestY = GAME_HEIGHT / 2;
+    let maxDistance = 0;
+    
+    // Try multiple positions and find the one farthest from death location
+    const attempts = 100;
+    for (let i = 0; i < attempts; i++) {
+        const testX = (Math.floor(Math.random() * ((GAME_WIDTH - BLOCK_SIZE * 4) / BLOCK_SIZE)) + 2) * BLOCK_SIZE;
+        const testY = (Math.floor(Math.random() * ((GAME_HEIGHT - BLOCK_SIZE * 4) / BLOCK_SIZE)) + 2) * BLOCK_SIZE;
+        
+        // Calculate distance from death location
+        const dx = testX - deathX;
+        const dy = testY - deathY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Check if position is safe (not occupied)
+        if (!isPositionOccupied(testX, testY, 1) && distance > maxDistance) {
+            maxDistance = distance;
+            bestX = testX;
+            bestY = testY;
+        }
+    }
+    
+    // If no safe position found, try center
+    if (isPositionOccupied(bestX, bestY, 1)) {
+        bestX = Math.floor(GAME_WIDTH / 2 / BLOCK_SIZE) * BLOCK_SIZE;
+        bestY = Math.floor(GAME_HEIGHT / 2 / BLOCK_SIZE) * BLOCK_SIZE;
+    }
+    
+    return [bestX, bestY];
+}
+
+function loseLife() {
+    // CRITICAL: Check invincibility FIRST - before any other checks
+    if (invincibilityTimer > 0) {
+        console.log('>>> loseLife() blocked: invincibility active, timer:', invincibilityTimer);
+        return lives > 0;
+    }
+    
+    // Prevent multiple calls in the same frame - CRITICAL CHECK
+    // This MUST be checked IMMEDIATELY and flags set IMMEDIATELY
+    if (lifeLostThisFrame) {
+        console.log('>>> loseLife() blocked: life already lost this frame');
+        return lives > 0;
+    }
+    
+    // Prevent losing life if already game over or no lives left
+    if (lives <= 0 || gameOver) {
+        console.log('>>> loseLife() blocked: no lives left or game over');
+        return false;
+    }
+    
+    // ATOMIC OPERATION: Set flags IMMEDIATELY as the VERY FIRST thing
+    // This prevents any other calls to loseLife() in the same frame
+    // Set BOTH flags before doing anything else
+    lifeLostThisFrame = true;
+    invincibilityTimer = INVINCIBILITY_DURATION;
+    
+    console.log('>>> loseLife() EXECUTING - setting flags. Invincibility:', invincibilityTimer);
+    
+    lives--;
+    updateLivesDisplay();
+    
+    console.log('>>> Life lost! Remaining lives:', lives, 'Invincibility started:', invincibilityTimer, 'Snake length:', snakeLength);
+    
+    if (lives <= 0) {
+        invincibilityTimer = 0; // Clear invincibility if game over
+        return false; // Game over
+    }
+    
+    // CLEAR ALL OBJECTS ON SCREEN to prevent immediate collisions
+    // This is the key fix: remove everything that could collide with respawned snake
+    targets = [];
+    slowTargets = [];
+    shrinkTargets = [];
+    speedTargets = [];
+    foods = [];
+    hearts = [];
+    bullets = [];
+    enemyBullets = [];
+    enemySnake = null;
+    particles = [];
+    
+    // Reset enemy spawn timer to give player time before next enemy
+    enemySpawnTimer = 0;
+    nextEnemySpawnTime = 60; // 5 seconds before first enemy spawns
+    
+    // Reset timers
+    slowdownTimer = 0;
+    speedupTimer = 0;
+    currentFPS = NORMAL_FPS;
+    frameInterval = 1000 / currentFPS;
+    
+    // IMMEDIATELY clear snake to prevent further collisions
+    snake = [];
+    // Reset to minimum length to avoid self-collision issues
+    snakeLength = 1;
+    
+    // Respawn snake in the CENTER of the screen
+    snakeX = Math.floor(GAME_WIDTH / 2 / BLOCK_SIZE) * BLOCK_SIZE;
+    snakeY = Math.floor(GAME_HEIGHT / 2 / BLOCK_SIZE) * BLOCK_SIZE;
+    
+    // CRITICAL: Reset all movement to zero to prevent any movement during invincibility
+    dirX = 0;
+    dirY = 0;
+    nextDirX = 0;
+    nextDirY = 0;
+    
+    // CRITICAL: Don't add any segments to snake array yet
+    // The first segment will be added naturally when snake starts moving after invincibility
+    // This prevents self-collision issues when snake respawns
+    // snake array stays empty until first movement after invincibility
+    
+    // Note: Random direction will be chosen when invincibility ends if player hasn't chosen direction
+    // This is handled in the update() function
+    
+    console.log('>>> Snake respawned at:', snakeX, snakeY, 'Length:', snakeLength, 'Invincibility:', invincibilityTimer, 'Snake segments:', snake.length, 'Lives:', lives);
+    
+    // CRITICAL: Ensure snake cannot collide with anything immediately after respawn
+    // All objects are cleared, snake array is empty, invincibility is set
+    // This should prevent any immediate collisions
+    
+    // Brief invincibility visual effect
+    spawnParticles(snakeX + BLOCK_SIZE/2, snakeY + BLOCK_SIZE/2, 30, '#ff3264');
+    sound.playPowerUp();
+    
+    // Return true to continue game - snake is now safely respawned
+    return true; // Continue game
 }
 
 function getRandomTargetType() {
@@ -1548,36 +1875,30 @@ function getRandomTargetType() {
 }
 
 function isValidTargetPosition(tx, ty, gridSize) {
-    for (let dx = 0; dx < gridSize; dx++) {
-        for (let dy = 0; dy < gridSize; dy++) {
-            const cellX = tx + dx * BLOCK_SIZE;
-            const cellY = ty + dy * BLOCK_SIZE;
-            
-            if (cellX < BLOCK_SIZE || cellX >= GAME_WIDTH - BLOCK_SIZE ||
-                cellY < BLOCK_SIZE || cellY >= GAME_HEIGHT - BLOCK_SIZE) {
-                return false;
-            }
-            
-            if (cellX === foodX && cellY === foodY) return false;
-            
-            for (const segment of snake) {
-                if (segment[0] === cellX && segment[1] === cellY) return false;
-            }
-            
-            for (const t of targets) {
-                if (t.occupiesCell(cellX, cellY)) return false;
-            }
-            for (const st of slowTargets) {
-                if (st.occupiesCell(cellX, cellY)) return false;
-            }
-            for (const sht of shrinkTargets) {
-                if (sht.occupiesCell(cellX, cellY)) return false;
-            }
-            for (const spt of speedTargets) {
-                if (spt.occupiesCell(cellX, cellY)) return false;
+    // Check boundaries
+    if (tx < BLOCK_SIZE || tx + gridSize * BLOCK_SIZE >= GAME_WIDTH - BLOCK_SIZE ||
+        ty < BLOCK_SIZE || ty + gridSize * BLOCK_SIZE >= GAME_HEIGHT - BLOCK_SIZE) {
+        return false;
+    }
+    
+    // Use isPositionOccupied to check all objects (snake, foods, hearts, targets, enemy snake)
+    if (isPositionOccupied(tx, ty, gridSize)) {
+        return false;
+    }
+    
+    // Also check enemy snake if it exists
+    if (enemySnake && enemySnake.alive) {
+        for (let dx = 0; dx < gridSize; dx++) {
+            for (let dy = 0; dy < gridSize; dy++) {
+                const cellX = tx + dx * BLOCK_SIZE;
+                const cellY = ty + dy * BLOCK_SIZE;
+                for (const seg of enemySnake.segments) {
+                    if (seg[0] === cellX && seg[1] === cellY) return false;
+                }
             }
         }
     }
+    
     return true;
 }
 
@@ -1691,7 +2012,45 @@ function updateStats() {
 function update() {
     if (gameOver || !gameStarted) return;
     
-    // Update direction
+    // CRITICAL: Check invincibility FIRST - skip ALL updates during invincibility
+    const wasInvincible = invincibilityTimer > 0;
+    if (invincibilityTimer > 0) {
+        invincibilityTimer--;
+        // During invincibility: DON'T update anything (no movement, no collisions, no other game logic)
+        // Snake should already be fully respawned - just blink visually
+        return;
+    }
+    
+    // If invincibility just ended and player hasn't chosen direction, pick random direction
+    // This prevents self-collision when snake starts moving after respawn
+    if (wasInvincible && nextDirX === 0 && nextDirY === 0) {
+        // Choose random direction: up, down, left, or right
+        const directions = [
+            {x: 0, y: -BLOCK_SIZE},  // Up
+            {x: 0, y: BLOCK_SIZE},   // Down
+            {x: -BLOCK_SIZE, y: 0}, // Left
+            {x: BLOCK_SIZE, y: 0}    // Right
+        ];
+        const randomDir = directions[Math.floor(Math.random() * directions.length)];
+        nextDirX = randomDir.x;
+        nextDirY = randomDir.y;
+        console.log('>>> Random direction chosen after respawn:', nextDirX, nextDirY);
+    }
+    
+    // Reset life loss flag at start of each frame (BEFORE any collision checks)
+    // This ensures we can detect collisions, but only lose one life per frame
+    const wasLifeLostLastFrame = lifeLostThisFrame;
+    lifeLostThisFrame = false;
+    
+    // If life was lost last frame, skip collision checks this frame to prevent immediate re-collision
+    if (wasLifeLostLastFrame) {
+        // Still update direction and other game mechanics, but skip collision detection
+        dirX = nextDirX;
+        dirY = nextDirY;
+        return;
+    }
+    
+    // Update direction (invincibility already checked above, so we're safe here)
     dirX = nextDirX;
     dirY = nextDirY;
     
@@ -1704,60 +2063,46 @@ function update() {
         }
     }
     
+    // CRITICAL: Check invincibility BEFORE any movement or collision checks
+    if (invincibilityTimer > 0) {
+        return; // Skip all updates during invincibility
+    }
+    
+    // CRITICAL: Check if life was already lost this frame BEFORE any updates
+    if (lifeLostThisFrame) {
+        return; // Skip all updates if life was already lost
+    }
+    
     // Move snake
     snakeX += dirX;
     snakeY += dirY;
     
-    // Wall collision
-    if (snakeX < 0 || snakeX >= GAME_WIDTH || snakeY < 0 || snakeY >= GAME_HEIGHT) {
-        endGame();
+    // Check wall collision BEFORE adding head (same logic as working wall collision)
+    // Skip collision checks during invincibility
+    if (invincibilityTimer === 0 && (snakeX < 0 || snakeX >= GAME_WIDTH || snakeY < 0 || snakeY >= GAME_HEIGHT)) {
+        if (!loseLife()) {
+            endGame();
+        }
         return;
     }
     
-    // Self collision
-    for (let i = 0; i < snake.length - 1; i++) {
-        if (snake[i][0] === snakeX && snake[i][1] === snakeY) {
-            endGame();
-            return;
-        }
-    }
+    // Add new head to snake
+    snake.push([snakeX, snakeY]);
     
-    // Target collision (dangerous squares)
-    for (const t of targets) {
-        if (t.isActive() && t.occupiesCell(snakeX, snakeY)) {
-            endGame();
-            return;
-        }
-    }
-    
-    // Enemy snake collision
-    if (enemySnake && enemySnake.alive && enemySnake.spawnAnimation <= 0) {
-        for (const seg of enemySnake.segments) {
-            if (seg[0] === snakeX && seg[1] === snakeY) {
-                endGame();
+    // Self collision (check BEFORE removing tail) - skip during invincibility
+    // CRITICAL: Also skip if snake array was empty before adding head (first movement after respawn)
+    if (invincibilityTimer === 0 && snake.length > 1) {
+        // Only check self-collision if snake has more than 1 segment
+        // If snake was empty and we just added first segment, no self-collision possible
+        for (let i = 0; i < snake.length - 1; i++) {
+            if (snake[i][0] === snakeX && snake[i][1] === snakeY) {
+                console.log('>>> Self-collision detected at:', snakeX, snakeY, 'Snake length:', snake.length);
+                if (!loseLife()) {
+                    endGame();
+                }
                 return;
             }
         }
-    }
-    
-    // Add new head
-    snake.push([snakeX, snakeY]);
-    
-    // Food collision
-    if (snakeX === foodX && snakeY === foodY) {
-        snakeLength++;
-        foodEaten++;
-        score++;
-        // Update music tempo based on snake length
-        sound.updateMusicTempo(snakeLength);
-        if (score > highScore) {
-            highScore = score;
-            newRecordThisGame = true;
-            localStorage.setItem('fireSnakeHighScore', highScore.toString());
-        }
-        sound.playEat();
-        spawnFood();
-        spawnParticles(foodX + BLOCK_SIZE/2, foodY + BLOCK_SIZE/2, 15, 'rgb(255, 50, 100)');
     }
     
     // Remove tail if too long
@@ -1765,11 +2110,116 @@ function update() {
         snake.shift();
     }
     
-    // Food timer
-    foodTimer--;
-    if (foodTimer <= 0) {
-        endGame();
-        return;
+    // Target collision (dangerous squares) - check AFTER movement - skip during invincibility
+    if (invincibilityTimer === 0) {
+        for (const t of targets) {
+            if (t.isActive() && t.occupiesCell(snakeX, snakeY)) {
+                if (!loseLife()) {
+                    endGame();
+                }
+                return;
+            }
+        }
+    }
+    
+    // Enemy snake collision - check AFTER movement - skip during invincibility
+    if (invincibilityTimer === 0 && enemySnake && enemySnake.alive && enemySnake.spawnAnimation <= 0) {
+        for (const seg of enemySnake.segments) {
+            if (seg[0] === snakeX && seg[1] === snakeY) {
+                if (!loseLife()) {
+                    endGame();
+                }
+                return;
+            }
+        }
+    }
+    
+    // Food collision (multiple food items with varying sizes)
+    for (let i = foods.length - 1; i >= 0; i--) {
+        const food = foods[i];
+        let eaten = false;
+        
+        // Check all cells of this food item
+        for (let fx = 0; fx < food.size && !eaten; fx++) {
+            for (let fy = 0; fy < food.size && !eaten; fy++) {
+                if (snakeX === food.x + fx * BLOCK_SIZE && snakeY === food.y + fy * BLOCK_SIZE) {
+                    // Eaten! Gain length based on food size
+                    const lengthGain = food.size * food.size; // 1, 4, or 9
+                    snakeLength += lengthGain;
+                    foodEaten++;
+                    score += lengthGain;
+                    
+                    // Update music tempo based on snake length
+                    sound.updateMusicTempo(snakeLength);
+                    
+                    if (score > highScore) {
+                        highScore = score;
+                        newRecordThisGame = true;
+                        localStorage.setItem('fireSnakeHighScore', highScore.toString());
+                    }
+                    
+                    sound.playEat();
+                    const centerX = food.x + (food.size * BLOCK_SIZE) / 2;
+                    const centerY = food.y + (food.size * BLOCK_SIZE) / 2;
+                    spawnParticles(centerX, centerY, 15 * food.size, COLORS.food);
+                    
+                    foods.splice(i, 1);
+                    eaten = true;
+                }
+            }
+        }
+    }
+    
+    // Heart collision (extra life pickup)
+    for (let i = hearts.length - 1; i >= 0; i--) {
+        if (snakeX === hearts[i].x && snakeY === hearts[i].y) {
+            lives++; // No limit on lives!
+            updateLivesDisplay();
+            score += 5; // Bonus for collecting heart
+            sound.playPowerUp();
+            spawnParticles(hearts[i].x + BLOCK_SIZE/2, hearts[i].y + BLOCK_SIZE/2, 20, '#ff3264');
+            hearts.splice(i, 1);
+        }
+    }
+    
+    // Remove tail if too long
+    while (snake.length > snakeLength) {
+        snake.shift();
+    }
+    
+    // Spawn more food if needed
+    if (foods.length === 0) {
+        spawnFoods();
+    }
+    
+    // Update food timers and remove expired food
+    for (let i = foods.length - 1; i >= 0; i--) {
+        foods[i].timer--;
+        foods[i].pulse += 0.1;
+        if (foods[i].timer <= 0) {
+            foods.splice(i, 1);
+        }
+    }
+    
+    // Spawn more food if all expired
+    if (foods.length === 0) {
+        spawnFoods();
+    }
+    
+    // Update heart timers
+    for (let i = hearts.length - 1; i >= 0; i--) {
+        hearts[i].timer--;
+        hearts[i].pulse += 0.15;
+        if (hearts[i].timer <= 0) {
+            hearts.splice(i, 1);
+        }
+    }
+    
+    // Heart spawn timer
+    heartSpawnTimer++;
+    if (heartSpawnTimer >= HEART_SPAWN_INTERVAL) {
+        heartSpawnTimer = 0;
+        spawnHeart(); // Only spawns if no heart exists (checked in function)
     }
     
     // Update timers
@@ -1805,6 +2255,35 @@ function update() {
         
         // Check bullet collisions
         let bulletHit = false;
+        
+        // Check if player bullet hits enemy snake FIRST (before other collisions)
+        // Enemy snake should die if hit in ANY part of body (head or tail)
+        if (enemySnake && enemySnake.alive) {
+            for (const seg of enemySnake.segments) {
+                const dx = bullets[i].x - (seg[0] + BLOCK_SIZE/2);
+                const dy = bullets[i].y - (seg[1] + BLOCK_SIZE/2);
+                if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
+                    // Hit enemy snake in ANY segment - kill it!
+                    // Points based on enemy type: DUMB=1, MEDIUM=5, SMART=10
+                    let killPoints = 1;
+                    if (enemySnake.type === 'MEDIUM') killPoints = 5;
+                    else if (enemySnake.type === 'SMART') killPoints = 10;
+                    
+                    enemySnake.die('shot_by_player');
+                    bullets.splice(i, 1);
+                    score += killPoints;
+                    if (score > highScore) {
+                        highScore = score;
+                        newRecordThisGame = true;
+                        localStorage.setItem('fireSnakeHighScore', highScore.toString());
+                    }
+                    bulletHit = true;
+                    break;
+                }
+            }
+        }
+        
+        if (bulletHit) continue;
         
         // Dangerous targets
         for (let j = targets.length - 1; j >= 0; j--) {
@@ -1885,6 +2364,27 @@ function update() {
                 targetsHit++;
                 speedTargets.splice(j, 1);
                 bullets.splice(i, 1);
+                bulletHit = true;
+                break;
+            }
+        }
+        
+        if (bulletHit) continue;
+        
+        // Food collision - hitting food with bullet causes life loss
+        // Use checkLineCollision for proper bullet trajectory collision detection
+        for (let j = foods.length - 1; j >= 0; j--) {
+            const food = foods[j];
+            const foodSize = food.size * BLOCK_SIZE;
+            // Check collision using line collision function (same as targets)
+            if (checkLineCollision(bullets[i], food.x, food.y, foodSize)) {
+                // Bullet hits food - player loses life!
+                console.log('>>> Bullet hit food at:', food.x, food.y, 'size:', food.size, '- losing life');
+                bullets.splice(i, 1);
+                if (!loseLife()) {
+                    endGame();
+                }
+                bulletHit = true;
                 break;
             }
         }
@@ -1941,40 +2441,38 @@ function update() {
         }
     }
     
-    // Update enemy bullets
+    // Update enemy bullets (only if not in invincibility)
+    // Note: bullets still move, but collision checks are skipped in updateEnemyBullets()
     updateEnemyBullets();
     
-    // Check if player bullet hits enemy snake
-    for (let i = bullets.length - 1; i >= 0; i--) {
-        if (enemySnake && enemySnake.alive) {
-            for (const seg of enemySnake.segments) {
-                const dx = bullets[i].x - (seg[0] + BLOCK_SIZE/2);
-                const dy = bullets[i].y - (seg[1] + BLOCK_SIZE/2);
-                if (Math.sqrt(dx*dx + dy*dy) < BLOCK_SIZE/2) {
-                    // Hit enemy snake - kill it!
-                    enemySnake.die();
-                    bullets.splice(i, 1);
-                    score += 5; // Bonus for killing enemy
-                    if (score > highScore) {
-                        highScore = score;
-                        newRecordThisGame = true;
-                        localStorage.setItem('fireSnakeHighScore', highScore.toString());
-                    }
-                    break;
-                }
-            }
-        }
-    }
+    // Note: Enemy snake collision with bullets is now checked in the bullet update loop above
+    // This ensures enemy snake dies when hit in ANY part of body (head or tail)
     
     updateStats();
 }
 
 function endGame() {
-    gameOver = true;
-    sound.stopGameMusic();
+    // Prevent multiple calls to endGame()
+    if (gameOver) {
+        console.log('>>> endGame() called but game already over, ignoring');
+        return;
+    }
     
-    // Play appropriate game over music
-    sound.playGameOverMusic(newRecordThisGame);
+    // Mark game as over immediately to prevent further updates
+    gameOver = true;
+    
+    // Show loading screen before transitioning to game over
+    showLoadingScreen();
+    
+    // Stop game music and start game over music IMMEDIATELY during loading
+    sound.stopGameMusic();
+    if (!soundMuted) {
+        sound.playGameOverMusic(newRecordThisGame);
+    }
+    
+    setTimeout(() => {
+        hideLoadingScreen();
+    }, 4000);
 }
 
 // ==========================================
@@ -2027,7 +2525,15 @@ function draw() {
     } else if (!gameStarted) {
         drawStartScreen();
         drawFood();
-        drawSnake();
+        // Draw snake with blinking effect during invincibility
+        if (invincibilityTimer > 0) {
+            // Blink effect: draw every other frame
+            if (Math.floor(invincibilityTimer / 3) % 2 === 0) {
+                drawSnake();
+            }
+        } else {
+            drawSnake();
+        }
     } else {
         // Draw game objects
         for (const t of targets) t.draw();
@@ -2035,7 +2541,15 @@ function draw() {
         for (const sht of shrinkTargets) sht.draw();
         for (const spt of speedTargets) spt.draw();
         drawFood();
-        drawSnake();
+        // Draw snake with blinking effect during invincibility
+        if (invincibilityTimer > 0) {
+            // Blink effect: draw every other frame
+            if (Math.floor(invincibilityTimer / 3) % 2 === 0) {
+                drawSnake();
+            }
+        } else {
+            drawSnake();
+        }
         
         // Draw enemy snake
         if (enemySnake && enemySnake.alive) {
@@ -2067,6 +2581,29 @@ function draw() {
 function drawSnake() {
     const isSlowed = slowdownTimer > 0;
     const isFast = speedupTimer > 0;
+    
+    // If snake array is empty but snakeX/snakeY are set (during respawn invincibility), draw single segment
+    if (snake.length === 0 && snakeX !== undefined && snakeY !== undefined) {
+        // Draw single segment during invincibility respawn with blinking effect
+        if (invincibilityTimer > 0) {
+            // Blink during invincibility
+            if (Math.floor(invincibilityTimer / 3) % 2 === 0) {
+                const color = COLORS.snakeHead;
+                ctx.fillStyle = COLORS.snakeGlow;
+                ctx.fillRect(snakeX - 2, snakeY - 2, BLOCK_SIZE + 4, BLOCK_SIZE + 4);
+                ctx.fillStyle = color;
+                ctx.fillRect(snakeX, snakeY, BLOCK_SIZE, BLOCK_SIZE);
+            }
+        } else {
+            // Normal draw when not invincible
+            const color = COLORS.snakeHead;
+            ctx.fillStyle = COLORS.snakeGlow;
+            ctx.fillRect(snakeX - 2, snakeY - 2, BLOCK_SIZE + 4, BLOCK_SIZE + 4);
+            ctx.fillStyle = color;
+            ctx.fillRect(snakeX, snakeY, BLOCK_SIZE, BLOCK_SIZE);
+        }
+        return;
+    }
     
     for (let i = 0; i < snake.length; i++) {
         const segment = snake[i];
@@ -2164,37 +2701,85 @@ function drawSnakeEyes(x, y) {
 }
 
 function drawFood() {
-    const pulse = Math.sin(foodPulse) * 0.2 + 1;
-    const size = BLOCK_SIZE * pulse;
-    const offset = (BLOCK_SIZE - size) / 2;
-    
-    // Glow
-    for (let i = 3; i > 0; i--) {
-        const glowSize = size + i * 6;
-        const glowOffset = (BLOCK_SIZE - glowSize) / 2;
-        ctx.fillStyle = hexToRgba(COLORS.food, (30 - i * 8) / 255);
+    // Draw all food items
+    for (const food of foods) {
+        const pulse = Math.sin(food.pulse) * 0.15 + 1;
+        const totalSize = food.size * BLOCK_SIZE;
+        const centerX = food.x + totalSize / 2;
+        const centerY = food.y + totalSize / 2;
+        const drawSize = totalSize * pulse;
+        
+        // Glow
+        for (let i = 3; i > 0; i--) {
+            const glowSize = drawSize / 2 + i * 4;
+            ctx.fillStyle = hexToRgba(COLORS.food, (30 - i * 8) / 255);
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, glowSize, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        // Food body
+        const foodGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, drawSize / 2);
+        foodGradient.addColorStop(0, COLORS.foodInner);
+        foodGradient.addColorStop(1, COLORS.food);
+        ctx.fillStyle = foodGradient;
         ctx.beginPath();
-        ctx.arc(foodX + BLOCK_SIZE/2, foodY + BLOCK_SIZE/2, glowSize/2, 0, Math.PI * 2);
+        ctx.arc(centerX, centerY, drawSize / 2, 0, Math.PI * 2);
         ctx.fill();
+        
+        // Highlight
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.beginPath();
+        ctx.arc(centerX - drawSize * 0.15, centerY - drawSize * 0.15, drawSize / 8, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Show size indicator for larger foods
+        if (food.size > 1) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            ctx.font = 'bold 12px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('+' + (food.size * food.size), centerX, centerY + 4);
+        }
+        
+        // Timer warning (flash when low)
+        if (food.timer < 60 && Math.floor(food.timer / 5) % 2 === 0) {
+            ctx.strokeStyle = '#ff3232';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, drawSize / 2 + 2, 0, Math.PI * 2);
+            ctx.stroke();
+        }
     }
     
-    // Food
-    const foodGradient = ctx.createRadialGradient(
-        foodX + BLOCK_SIZE/2, foodY + BLOCK_SIZE/2, 0,
-        foodX + BLOCK_SIZE/2, foodY + BLOCK_SIZE/2, size/2
-    );
-    foodGradient.addColorStop(0, COLORS.foodInner);
-    foodGradient.addColorStop(1, COLORS.food);
-    ctx.fillStyle = foodGradient;
-    ctx.beginPath();
-    ctx.arc(foodX + BLOCK_SIZE/2, foodY + BLOCK_SIZE/2, size/2, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Highlight
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.beginPath();
-    ctx.arc(foodX + offset + size * 0.3, foodY + offset + size * 0.3, size/6, 0, Math.PI * 2);
-    ctx.fill();
+    // Draw hearts
+    for (const heart of hearts) {
+        const pulse = Math.sin(heart.pulse) * 0.2 + 1;
+        const size = BLOCK_SIZE * pulse;
+        const centerX = heart.x + BLOCK_SIZE / 2;
+        const centerY = heart.y + BLOCK_SIZE / 2;
+        
+        // Glow
+        ctx.fillStyle = 'rgba(255, 50, 100, 0.4)';
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, size / 2 + 8, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Heart symbol
+        ctx.fillStyle = '#ff3264';
+        ctx.font = `bold ${Math.floor(size)}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('❤', centerX, centerY);
+        
+        // Timer warning
+        if (heart.timer < 60 && Math.floor(heart.timer / 5) % 2 === 0) {
+            ctx.strokeStyle = '#ffff00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, size / 2 + 4, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
 }
 
 function drawEffectBar(timer, maxTimer, color, text) {
@@ -2225,26 +2810,8 @@ function drawEffectBar(timer, maxTimer, color, text) {
 }
 
 function drawFoodTimer() {
-    const progress = foodTimer / FOOD_TIME_LIMIT;
-    const barWidth = 100;
-    const barHeight = 6;
-    const barX = foodX + BLOCK_SIZE/2 - barWidth/2;
-    const barY = foodY - 12;
-    
-    // Only show when less than 50%
-    if (progress < 0.5) {
-        const alpha = 1 - progress * 2;
-        const color = progress < 0.25 ? '#ff3232' : '#ffaa00';
-        
-        ctx.fillStyle = `rgba(0, 0, 0, ${0.5 * alpha})`;
-        ctx.fillRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4);
-        
-        ctx.fillStyle = `rgba(50, 50, 50, ${alpha})`;
-        ctx.fillRect(barX, barY, barWidth, barHeight);
-        
-        ctx.fillStyle = hexToRgba(color, alpha);
-        ctx.fillRect(barX, barY, barWidth * progress, barHeight);
-    }
+    // Food timers are now shown individually on each food item
+    // This function is kept for compatibility but does nothing
 }
 
 function drawEnemyWarning() {
@@ -2396,7 +2963,16 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         // Space for restart when game over
         if (gameOver) {
-            initGame();
+            showLoadingScreen();
+            // Start menu music IMMEDIATELY during loading
+            sound.stopGameMusic();
+            if (!soundMuted) {
+                sound.playMenuMusic();
+            }
+            setTimeout(() => {
+                initGame(true);
+                hideLoadingScreen();
+            }, 4000);
             return;
         }
         // Space to START the game from menu
@@ -2417,7 +2993,16 @@ document.addEventListener('keydown', (e) => {
     
     // Restart with R
     if (key === 'r' && gameOver) {
-        initGame();
+        showLoadingScreen();
+        // Start menu music IMMEDIATELY during loading
+        sound.stopGameMusic();
+        if (!soundMuted) {
+            sound.playMenuMusic();
+        }
+        setTimeout(() => {
+            initGame(true);
+            hideLoadingScreen();
+        }, 4000);
     }
     
     // Mute with M or Backspace
@@ -2434,6 +3019,55 @@ document.addEventListener('keydown', (e) => {
                 sound.playMenuMusic();
             }
         }
+    }
+    
+    // Escape to exit/return to menu (NEVER close browser window)
+    if (key === 'escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (gameStarted && !gameOver) {
+            // During game - show loading and return to menu
+            showLoadingScreen();
+            // Start menu music IMMEDIATELY during loading
+            sound.stopGameMusic();
+            if (!soundMuted) {
+                sound.playMenuMusic();
+            }
+            setTimeout(() => {
+                initGame(true);
+                hideLoadingScreen();
+            }, 4000);
+        } else if (gameOver) {
+            // At game over - show loading and return to menu
+            showLoadingScreen();
+            // Start menu music IMMEDIATELY during loading
+            sound.stopGameMusic();
+            if (!soundMuted) {
+                sound.playMenuMusic();
+            }
+            setTimeout(() => {
+                initGame(true);
+                hideLoadingScreen();
+            }, 4000);
+        } else {
+            // In menu - close the game/window
+            e.preventDefault();
+            e.stopPropagation();
+            // Try to close the window (works if opened via window.open)
+            if (window.opener) {
+                window.close();
+            } else {
+                // If not opened via window.open, try to close anyway
+                // Some browsers may block this, but we try
+                window.close();
+                // Fallback: show confirmation
+                if (confirm('Вы действительно хотите выйти из игры?')) {
+                    // Try to navigate away or close
+                    window.close();
+                }
+            }
+        }
+        return false;
     }
 });
 
@@ -2456,15 +3090,64 @@ document.addEventListener('click', () => {
     }
 });
 
+// Prevent Escape from closing browser window ONLY during game (capture phase)
+// In menu, allow Escape to close the window
+window.addEventListener('keydown', (e) => {
+    if ((e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) && (gameStarted || gameOver)) {
+        // During game or game over - prevent default, let main handler deal with it
+        // Don't prevent in menu - allow it to close
+        return;
+    }
+}, true); // Use capture phase to intercept before browser handles it
+
 // ==========================================
 // INITIALIZATION
 // ==========================================
-// Create stars
-for (let i = 0; i < 100; i++) {
-    stars.push(new Star());
+
+// Loading screen functionality
+function showLoadingScreen() {
+    const loadingScreen = document.getElementById('loadingScreen');
+    if (loadingScreen) {
+        loadingScreen.style.display = 'flex';
+        loadingScreen.style.opacity = '1';
+        loadingScreen.style.pointerEvents = 'auto';
+        loadingScreen.style.zIndex = '1000';
+        loadingScreen.classList.remove('hidden');
+    }
 }
 
-initGame();
-requestAnimationFrame(gameLoop);
+function hideLoadingScreen() {
+    const loadingScreen = document.getElementById('loadingScreen');
+    if (loadingScreen) {
+        // Immediately hide and remove from DOM flow
+        loadingScreen.style.opacity = '0';
+        loadingScreen.style.pointerEvents = 'none';
+        loadingScreen.style.zIndex = '-1';
+        setTimeout(() => {
+            loadingScreen.style.display = 'none';
+            loadingScreen.classList.add('hidden');
+        }, 300);
+    }
+    gameLoaded = true;
+}
+
+function showGame() {
+    // Create stars
+    for (let i = 0; i < 100; i++) {
+        stars.push(new Star());
+    }
+    
+    initGame(true);
+    updateLivesDisplay();
+    requestAnimationFrame(gameLoop);
+    
+    // Hide loading screen after exactly 4 seconds
+    setTimeout(() => {
+        hideLoadingScreen();
+    }, 4000);
+}
+
+// Start loading immediately
+showGame();
 
 console.log('Fire Snake Game loaded! Open http://localhost:5050 to play.');

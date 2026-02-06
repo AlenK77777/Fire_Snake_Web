@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Fire Snake Game</title>
     <style>
         * {
@@ -19,7 +22,7 @@
             align-items: center;
             font-family: 'Segoe UI', Arial, sans-serif;
             overflow: auto;
-            padding: 10px;
+            padding: 15px;
         }
         
         .game-container {
@@ -28,34 +31,116 @@
             border-radius: 12px;
             overflow: hidden;
             box-shadow: 0 0 60px rgba(0, 255, 150, 0.3);
-            max-height: 95vh;
-            max-width: 98vw;
+            max-height: 92vh;
+            max-width: 96vw;
         }
         
         #gameCanvas {
             display: block;
             border: 3px solid rgba(0, 255, 150, 0.5);
             border-right: none;
-            max-height: 95vh;
+            max-height: 92vh;
             width: auto;
             height: auto;
         }
         
         #statsPanel {
             width: 220px;
+            min-width: 200px;
             background: linear-gradient(180deg, #0a0a19 0%, #101025 100%);
             border: 3px solid rgba(0, 255, 150, 0.5);
-            padding: 20px;
+            padding: 15px;
+            padding-bottom: 20px;
             color: white;
+            overflow-y: auto;
+            max-height: 92vh;
+        }
+        
+        /* Loading screen */
+        #loadingScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3a 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            transition: opacity 0.5s ease;
+        }
+        
+        #loadingScreen.hidden {
+            opacity: 0 !important;
+            pointer-events: none !important;
+            z-index: -1 !important;
+            display: none !important;
+        }
+        
+        .loading-title {
+            font-size: 48px;
+            font-weight: bold;
+            color: #ff6600;
+            text-shadow: 0 0 30px rgba(255, 100, 0, 0.8);
+            margin-bottom: 30px;
+            animation: pulse-loading 1s ease-in-out infinite;
+        }
+        
+        .loading-text {
+            font-size: 18px;
+            color: #00ff96;
+            animation: blink 1s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-loading {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
         
         .stat-title {
-            color: #00ff96;
             font-size: 24px;
             font-weight: bold;
             text-align: center;
-            margin-bottom: 20px;
-            text-shadow: 0 0 20px rgba(0, 255, 150, 0.5);
+            margin-bottom: 15px;
+            animation: title-pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes title-pulse {
+            0%, 100% { 
+                color: #ffd700; 
+                text-shadow: 0 0 20px rgba(255, 215, 0, 0.8);
+                transform: scale(1);
+            }
+            50% { 
+                color: #ff4400; 
+                text-shadow: 0 0 30px rgba(255, 68, 0, 1);
+                transform: scale(1.05);
+            }
+        }
+        
+        .lives-display {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+            margin-bottom: 10px;
+        }
+        
+        .heart {
+            color: #ff3264;
+            font-size: 20px;
+            text-shadow: 0 0 10px rgba(255, 50, 100, 0.5);
+        }
+        
+        .heart.lost {
+            color: #333;
+            text-shadow: none;
         }
         
         .stat-item {
@@ -166,10 +251,22 @@
     <script src="https://www.midijs.net/lib/midi.js"></script>
 </head>
 <body>
+    <!-- Loading Screen -->
+    <div id="loadingScreen">
+        <div class="loading-title">FIRE SNAKE</div>
+        <div class="loading-text">Loading...</div>
+    </div>
+    
     <div class="game-container">
         <canvas id="gameCanvas" width="800" height="800"></canvas>
         <div id="statsPanel">
             <div class="stat-title">FIRE SNAKE</div>
+            
+            <div class="lives-display" id="livesDisplay">
+                <span class="heart">❤</span>
+                <span class="heart">❤</span>
+                <span class="heart">❤</span>
+            </div>
             
             <div class="stat-item">
                 <div class="stat-label">Score</div>
@@ -197,13 +294,14 @@
                 <span class="key">↑↓←→</span> Move<br>
                 <span class="key">WASD</span> Move<br>
                 <span class="key">BACKSPACE</span> Mute<br>
+                <span class="key">ESC</span> Exit<br>
                 <span class="key">R</span> Restart
             </div>
             
             <div class="legend">
                 <div class="legend-item">
                     <div class="legend-shape shape-food"></div>
-                    <span>Food (+1 length)</span>
+                    <span>Food (+length)</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-shape shape-square"></div>
@@ -211,7 +309,7 @@
                 </div>
                 <div class="legend-item">
                     <div class="legend-shape shape-circle"></div>
-                    <span>Slow (2x slower)</span>
+                    <span>Slow (÷2 speed)</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-shape"><div class="shape-triangle"></div></div>
@@ -219,12 +317,28 @@
                 </div>
                 <div class="legend-item">
                     <div class="legend-shape"><div class="shape-diamond"></div></div>
-                    <span>Speed (2x faster)</span>
+                    <span>Speed (×2 speed)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-shape" style="color:#ff3264;font-size:14px;">❤</div>
+                    <span>Extra life</span>
                 </div>
             </div>
         </div>
     </div>
     
-    <script src="/js/game.js"></script>
+    <!-- Load game script with cache busting -->
+    <script>
+        // Add version/timestamp to prevent browser caching
+        const script = document.createElement('script');
+        script.src = '/js/game.js?v=' + Date.now();
+        script.onerror = function() {
+            // Fallback: try without version if timestamp fails
+            const fallbackScript = document.createElement('script');
+            fallbackScript.src = '/js/game.js';
+            document.body.appendChild(fallbackScript);
+        };
+        document.body.appendChild(script);
+    </script>
 </body>
 </html>
