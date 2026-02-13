@@ -327,18 +327,17 @@
         </div>
     </div>
     
-    <!-- Load game script with cache busting -->
-    <script>
+    <!-- Load game script as ES6 module with cache busting -->
+    <script type="module">
         // Add version/timestamp to prevent browser caching
-        const script = document.createElement('script');
-        script.src = '/js/game.js?v=' + Date.now();
-        script.onerror = function() {
+        const timestamp = '?v=' + Date.now();
+        import('/js/game.js' + timestamp).catch((error) => {
+            console.error('Failed to load game.js with timestamp:', error);
             // Fallback: try without version if timestamp fails
-            const fallbackScript = document.createElement('script');
-            fallbackScript.src = '/js/game.js';
-            document.body.appendChild(fallbackScript);
-        };
-        document.body.appendChild(script);
+            import('/js/game.js').catch((err) => {
+                console.error('Failed to load game.js:', err);
+            });
+        });
     </script>
 </body>
 </html>
