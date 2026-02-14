@@ -1038,21 +1038,18 @@ class EnemySnake {
         // Add new head
         this.segments.push([newX, newY]);
         
-        // Check if enemy eats food (from multiple food items)
+        // Check if enemy eats food — one food object = one circle
         for (let i = foods.length - 1; i >= 0; i--) {
             const food = foods[i];
-            for (let fx = 0; fx < food.size; fx++) {
-                for (let fy = 0; fy < food.size; fy++) {
-                    if (newX === food.x + fx * BLOCK_SIZE && newY === food.y + fy * BLOCK_SIZE) {
-                        this.length += food.size;
-                        foods.splice(i, 1);
-                        if (foods.length === 0) {
-                            spawnFoods();
-                        }
-                        break;
-                    }
-                }
-            }
+            if (!food.cells?.length) continue;
+            const hit = food.cells.some(([dx, dy]) =>
+                newX === food.x + dx * BLOCK_SIZE && newY === food.y + dy * BLOCK_SIZE
+            );
+            if (!hit) continue;
+            this.length += 1;
+            foods.splice(i, 1);
+            if (foods.length === 0) spawnFoods();
+            break;
         }
         
         // Remove tail if too long
@@ -1487,7 +1484,7 @@ function startGame() {
     setTimeout(() => {
         GameState.gameStarted = true;
         hideLoadingScreen();
-    }, 4000);
+    }, 2000);
 }
 
 // Check if a position overlaps with any existing game objects
@@ -1506,13 +1503,12 @@ function isPositionOccupied(x, y, size = 1) {
         }
     }
     
-    // Check existing foods
+    // Check existing foods (cells-based Tetris shapes)
     for (const food of foods) {
+        const cells = food.cells || (function(){ const s=food.size||1; const c=[]; for(let fx=0;fx<s;fx++) for(let fy=0;fy<s;fy++) c.push([fx,fy]); return c; })();
         for (const cell of checkCells) {
-            for (let fx = 0; fx < food.size; fx++) {
-                for (let fy = 0; fy < food.size; fy++) {
-                    if (food.x + fx * BLOCK_SIZE === cell[0] && food.y + fy * BLOCK_SIZE === cell[1]) return true;
-                }
+            for (const [dx, dy] of cells) {
+                if (food.x + dx * BLOCK_SIZE === cell[0] && food.y + dy * BLOCK_SIZE === cell[1]) return true;
             }
         }
     }
@@ -1558,35 +1554,71 @@ function spawnFoods() {
     }
 }
 
+// Generate a random Tetris-like shape (connected cells), 1-9 cells
+function generateTetrisShape() {
+    const numCells = 1 + Math.floor(Math.random() * 9); // 1 to 9
+    const set = new Set();
+    set.add('0,0');
+    const neighbors = (a, b) => [[a-1,b],[a+1,b],[a,b-1],[a,b+1]];
+    
+    while (set.size < numCells) {
+        const entries = Array.from(set);
+        const pick = entries[Math.floor(Math.random() * entries.length)].split(',').map(Number);
+        const adj = neighbors(pick[0], pick[1]);
+        const empty = adj.filter(([x,y]) => !set.has(x+','+y));
+        if (empty.length === 0) break;
+        const [nx, ny] = empty[Math.floor(Math.random() * empty.length)];
+        set.add(nx+','+ny);
+    }
+    
+    const cells = Array.from(set).map(s => s.split(',').map(Number));
+    const minX = Math.min(...cells.map(c => c[0]));
+    const minY = Math.min(...cells.map(c => c[1]));
+    const normalized = cells.map(([a, b]) => [a - minX, b - minY]);
+    const w = Math.max(...normalized.map(c => c[0])) + 1;
+    const h = Math.max(...normalized.map(c => c[1])) + 1;
+    return { cells: normalized, width: w, height: h };
+}
+
 function spawnSingleFood() {
-    // Random size: 1x1 (60%), 2x2 (25%), 3x3 (15%)
-    const sizeRoll = Math.random() * 100;
-    let size;
-    if (sizeRoll < 60) size = 1;
-    else if (sizeRoll < 85) size = 2;
-    else size = 3;
+    const shape = generateTetrisShape();
+    const w = shape.width;
+    const h = shape.height;
     
     let attempts = 0;
     const maxAttempts = 50;
     
     while (attempts < maxAttempts) {
-        const maxX = Math.floor((GAME_WIDTH - BLOCK_SIZE * (size + 1)) / BLOCK_SIZE);
-        const maxY = Math.floor((GAME_HEIGHT - BLOCK_SIZE * (size + 1)) / BLOCK_SIZE);
-        const x = (Math.floor(Math.random() * maxX) + 1) * BLOCK_SIZE;
-        const y = (Math.floor(Math.random() * maxY) + 1) * BLOCK_SIZE;
+        const maxX = Math.floor((GAME_WIDTH - BLOCK_SIZE * (w + 1)) / BLOCK_SIZE);
+        const maxY = Math.floor((GAME_HEIGHT - BLOCK_SIZE * (h + 1)) / BLOCK_SIZE);
+        const baseX = (Math.floor(Math.random() * Math.max(1, maxX)) + 1) * BLOCK_SIZE;
+        const baseY = (Math.floor(Math.random() * Math.max(1, maxY)) + 1) * BLOCK_SIZE;
         
-        if (!isPositionOccupied(x, y, size)) {
-            foods.push({
-                x: x,
-                y: y,
-                size: size,
-                timer: FOOD_TIME_LIMIT + Math.random() * 60, // Slight variation in timer
-                pulse: Math.random() * Math.PI * 2
-            });
+        if (!isPositionOccupiedForShape(baseX, baseY, shape.cells)) {
+            const timer = FOOD_TIME_LIMIT + Math.random() * 60;
+            // One food object per cell — eating removes only that circle
+            for (const [dx, dy] of shape.cells) {
+                foods.push({
+                    x: baseX + dx * BLOCK_SIZE,
+                    y: baseY + dy * BLOCK_SIZE,
+                    cells: [[0, 0]],
+                    timer,
+                    pulse: Math.random() * Math.PI * 2
+                });
+            }
             return;
         }
         attempts++;
     }
+}
+
+function isPositionOccupiedForShape(baseX, baseY, cells) {
+    for (const [dx, dy] of cells) {
+        const cx = baseX + dx * BLOCK_SIZE;
+        const cy = baseY + dy * BLOCK_SIZE;
+        if (isPositionOccupied(cx, cy, 1)) return true;
+    }
+    return false;
 }
 
 // Spawn a heart pickup (extra life)
@@ -2023,48 +2055,35 @@ function update() {
         }
     }
     
-    // Food collision (multiple food items with varying sizes)
+    // Food collision — each food object is ONE circle; remove only the one hit
     for (let i = foods.length - 1; i >= 0; i--) {
         const food = foods[i];
-        let eaten = false;
-        
-        // Check all cells of this food item
-        for (let fx = 0; fx < food.size && !eaten; fx++) {
-            for (let fy = 0; fy < food.size && !eaten; fy++) {
-                if (GameState.snakeX === food.x + fx * BLOCK_SIZE && GameState.snakeY === food.y + fy * BLOCK_SIZE) {
-                    // Eaten! Gain length based on food size
-                    const lengthGain = food.size * food.size; // 1, 4, or 9
-                    GameState.snakeLength += lengthGain;
-                    GameState.foodEaten++;
-                    GameState.score += lengthGain;
-                    
-                    // Update music tempo based on snake length
-                    sound.updateMusicTempo(GameState.snakeLength);
-                    
-                    if (GameState.score > GameState.highScore) {
-                        GameState.highScore = GameState.score;
-                        GameState.newRecordThisGame = true;
-                        localStorage.setItem('fireSnakeHighScore', GameState.highScore.toString());
-                    }
-                    
-                    sound.playEat();
-                    const centerX = food.x + (food.size * BLOCK_SIZE) / 2;
-                    const centerY = food.y + (food.size * BLOCK_SIZE) / 2;
-                    spawnParticles(centerX, centerY, 15 * food.size, COLORS.food);
-                    
-                    foods.splice(i, 1);
-                    eaten = true;
-                }
-            }
+        const hit = food.cells && food.cells.some(([dx, dy]) =>
+            GameState.snakeX === food.x + dx * BLOCK_SIZE &&
+            GameState.snakeY === food.y + dy * BLOCK_SIZE
+        );
+        if (!hit) continue;
+        GameState.snakeLength += 1;
+        GameState.foodEaten++;
+        GameState.score += 1;
+        sound.updateMusicTempo(GameState.snakeLength);
+        if (GameState.score > GameState.highScore) {
+            GameState.highScore = GameState.score;
+            GameState.newRecordThisGame = true;
+            localStorage.setItem('fireSnakeHighScore', GameState.highScore.toString());
         }
+        sound.playEat();
+        spawnParticles(food.x + BLOCK_SIZE / 2, food.y + BLOCK_SIZE / 2, 5, COLORS.food);
+        foods.splice(i, 1); // remove this one food object (one circle)
+        break;
     }
     
     // Heart collision (extra life pickup)
     for (let i = hearts.length - 1; i >= 0; i--) {
         if (GameState.snakeX === hearts[i].x && GameState.snakeY === hearts[i].y) {
-            lives++; // No limit on lives!
+            GameState.lives++; // No limit on lives!
             updateLivesDisplay();
-            score += 5; // Bonus for collecting heart
+            GameState.score += 5; // Bonus for collecting heart
             sound.playPowerUp();
             spawnParticles(hearts[i].x + BLOCK_SIZE/2, hearts[i].y + BLOCK_SIZE/2, 20, '#ff3264');
             hearts.splice(i, 1);
@@ -2271,22 +2290,22 @@ function update() {
         
         if (bulletHit) continue;
         
-        // Food collision - hitting food with bullet causes life loss
-        // Use checkLineCollision for proper bullet trajectory collision detection
+        // Food collision — bullet hits one circle (one food object)
         for (let j = foods.length - 1; j >= 0; j--) {
             const food = foods[j];
-            const foodSize = food.size * BLOCK_SIZE;
-            // Check collision using line collision function (same as targets)
-            if (checkLineCollision(bullets[i], food.x, food.y, foodSize)) {
-                // Bullet hits food - player loses life!
-                console.log('>>> Bullet hit food at:', food.x, food.y, 'size:', food.size, '- losing life');
-                bullets.splice(i, 1);
-                if (!loseLife()) {
-                    endGame();
+            if (!food.cells?.length) continue;
+            for (const [dx, dy] of food.cells) {
+                const cellX = food.x + dx * BLOCK_SIZE;
+                const cellY = food.y + dy * BLOCK_SIZE;
+                if (checkLineCollision(bullets[i], cellX, cellY, BLOCK_SIZE)) {
+                    bullets.splice(i, 1);
+                    foods.splice(j, 1);
+                    if (!loseLife()) endGame();
+                    bulletHit = true;
+                    break;
                 }
-                bulletHit = true;
-                break;
             }
+            if (bulletHit) break;
         }
     }
     
@@ -2372,7 +2391,7 @@ function endGame() {
     
     setTimeout(() => {
         hideLoadingScreen();
-    }, 4000);
+    }, 2000);
 }
 
 // ==========================================
@@ -2485,8 +2504,8 @@ function draw() {
 // Draw "Choose direction" text and direction arrow during respawn invincibility
 function drawRespawnDirectionUI(centerX, segmentTopY) {
     if (!ctx) return;
-    const textY = segmentTopY - 28;
-    const arrowY = segmentTopY - 12;
+    const textY = segmentTopY - 52;
+    const arrowY = segmentTopY - 28;
     
     // "Choose direction" text above the snake
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -2659,53 +2678,49 @@ function drawSnakeEyes(x, y) {
 }
 
 function drawFood() {
-    // Draw all food items
+    // Draw all food items as Tetris shapes (small circles per cell)
     for (const food of foods) {
-        const pulse = Math.sin(food.pulse) * 0.15 + 1;
-        const totalSize = food.size * BLOCK_SIZE;
-        const centerX = food.x + totalSize / 2;
-        const centerY = food.y + totalSize / 2;
-        const drawSize = totalSize * pulse;
+        const pulse = Math.sin(food.pulse) * 0.12 + 1;
+        const cellRadius = (BLOCK_SIZE / 2) * pulse;
+        const cells = food.cells || [];
         
-        // Glow
-        for (let i = 3; i > 0; i--) {
-            const glowSize = drawSize / 2 + i * 4;
-            ctx.fillStyle = hexToRgba(COLORS.food, (30 - i * 8) / 255);
+        for (const [dx, dy] of cells) {
+            const cx = food.x + dx * BLOCK_SIZE + BLOCK_SIZE / 2;
+            const cy = food.y + dy * BLOCK_SIZE + BLOCK_SIZE / 2;
+            
+            // Glow
+            for (let g = 3; g > 0; g--) {
+                ctx.fillStyle = hexToRgba(COLORS.food, (30 - g * 8) / 255);
+                ctx.beginPath();
+                ctx.arc(cx, cy, cellRadius + g * 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // Small circle (food cell)
+            const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cellRadius);
+            grad.addColorStop(0, COLORS.foodInner);
+            grad.addColorStop(1, COLORS.food);
+            ctx.fillStyle = grad;
             ctx.beginPath();
-            ctx.arc(centerX, centerY, glowSize, 0, Math.PI * 2);
+            ctx.arc(cx, cy, cellRadius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Highlight
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.beginPath();
+            ctx.arc(cx - 2, cy - 2, 2, 0, Math.PI * 2);
             ctx.fill();
         }
         
-        // Food body
-        const foodGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, drawSize / 2);
-        foodGradient.addColorStop(0, COLORS.foodInner);
-        foodGradient.addColorStop(1, COLORS.food);
-        ctx.fillStyle = foodGradient;
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, drawSize / 2, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // Highlight
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-        ctx.beginPath();
-        ctx.arc(centerX - drawSize * 0.15, centerY - drawSize * 0.15, drawSize / 8, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // Show size indicator for larger foods
-        if (food.size > 1) {
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-            ctx.font = 'bold 12px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('+' + (food.size * food.size), centerX, centerY + 4);
-        }
-        
-        // Timer warning (flash when low)
-        if (food.timer < 60 && Math.floor(food.timer / 5) % 2 === 0) {
+        // Timer warning (flash when low) - on bounding box
+        if (food.timer < 60 && Math.floor(food.timer / 5) % 2 === 0 && cells.length > 0) {
+            const minDx = Math.min(...cells.map(c => c[0])), maxDx = Math.max(...cells.map(c => c[0]));
+            const minDy = Math.min(...cells.map(c => c[1])), maxDy = Math.max(...cells.map(c => c[1]));
+            const bx = food.x + minDx * BLOCK_SIZE, by = food.y + minDy * BLOCK_SIZE;
+            const bw = (maxDx - minDx + 1) * BLOCK_SIZE, bh = (maxDy - minDy + 1) * BLOCK_SIZE;
             ctx.strokeStyle = '#ff3232';
             ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(centerX, centerY, drawSize / 2 + 2, 0, Math.PI * 2);
-            ctx.stroke();
+            ctx.strokeRect(bx - 2, by - 2, bw + 4, bh + 4);
         }
     }
     
@@ -2930,7 +2945,7 @@ document.addEventListener('keydown', (e) => {
             setTimeout(() => {
                 initGame(true);
                 hideLoadingScreen();
-            }, 4000);
+            }, 2000);
             return;
         }
         // Space to START the game from menu
@@ -2960,7 +2975,7 @@ document.addEventListener('keydown', (e) => {
         setTimeout(() => {
             initGame(true);
             hideLoadingScreen();
-        }, 4000);
+        }, 2000);
     }
     
     // Mute with M or Backspace
@@ -2994,7 +3009,7 @@ document.addEventListener('keydown', (e) => {
             setTimeout(() => {
                 initGame(true);
                 hideLoadingScreen();
-            }, 4000);
+            }, 2000);
         } else if (GameState.gameOver) {
             // At game over - show loading and return to menu
             showLoadingScreen();
@@ -3006,7 +3021,7 @@ document.addEventListener('keydown', (e) => {
             setTimeout(() => {
                 initGame(true);
                 hideLoadingScreen();
-            }, 4000);
+            }, 2000);
         } else {
             // In menu - close the game/window
             e.preventDefault();
@@ -3109,7 +3124,7 @@ function showGame() {
     // Hide loading screen after exactly 4 seconds
     setTimeout(() => {
         hideLoadingScreen();
-    }, 4000);
+    }, 2000);
 }
 
 // Wait for DOM to be ready before starting
