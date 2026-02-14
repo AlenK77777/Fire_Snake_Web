@@ -6,6 +6,8 @@ venv/
 .vscode/
 dist/
 build/
+misc/
+logs/
 *.exe
 *.pkg
 *.rar

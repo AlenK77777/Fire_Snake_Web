@@ -56,6 +56,18 @@ console.log('Cache cleared. Fresh version loaded at:', new Date().toLocaleString
 // Initialize high score from localStorage
 GameState.highScore = parseInt(localStorage.getItem('fireSnakeHighScore') || '0');
 
+// Session log: send events to server (logs/ folder, one file per session)
+const LOG_SESSION_ID = '' + Date.now();
+function logToServer(message) {
+    try {
+        fetch('/api/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: LOG_SESSION_ID, message })
+        }).catch(() => {});
+    } catch (_) {}
+}
+
 // Sound context
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -1187,6 +1199,7 @@ class EnemySnake {
     
     die(reason = 'unknown') {
         console.log('>>> ENEMY DIED! Reason:', reason, 'Type:', this.type, 'Position:', this.getHead());
+        logToServer('Enemy died reason=' + reason + ' type=' + this.type);
         this.alive = false;
         // Spawn particles
         const head = this.getHead();
@@ -1298,6 +1311,7 @@ function spawnEnemySnake() {
     }
     
     console.log('Creating enemy snake of type:', type, 'with length:', GameState.snakeLength);
+    logToServer('Enemy spawned type=' + type + ' length=' + GameState.snakeLength);
     // Create enemy with player's current length
     GameState.enemySnake = new EnemySnake(type, GameState.snakeLength);
     console.log('Enemy snake created:', GameState.enemySnake);
@@ -1484,6 +1498,7 @@ function startGame() {
     setTimeout(() => {
         GameState.gameStarted = true;
         hideLoadingScreen();
+        logToServer('Game started — score=0 length=' + GameState.snakeLength + ' lives=' + GameState.lives);
     }, 2000);
 }
 
@@ -1730,7 +1745,8 @@ function loseLife() {
     updateLivesDisplay();
     
     console.log('>>> Life lost! Remaining lives:', GameState.lives, 'Invincibility started:', GameState.invincibilityTimer, 'Snake length:', GameState.snakeLength);
-    
+    logToServer('Life lost — remaining lives=' + GameState.lives + ' invincibility=48 snakeLength=' + GameState.snakeLength);
+
     if (GameState.lives <= 0) {
         GameState.invincibilityTimer = 0; // Clear invincibility if game over
         return false; // Game over
@@ -1787,6 +1803,7 @@ function loseLife() {
     // snake array stays empty until first movement after invincibility
     
     console.log('>>> Snake respawned at:', GameState.snakeX, GameState.snakeY, 'Length:', GameState.snakeLength, 'Invincibility:', GameState.invincibilityTimer, 'Snake segments:', snake.length, 'Lives:', GameState.lives);
+    logToServer('Snake respawned at ' + GameState.snakeX + ',' + GameState.snakeY + ' length=' + GameState.snakeLength + ' lives=' + GameState.lives);
     
     // CRITICAL: Ensure snake cannot collide with anything immediately after respawn
     // All objects are cleared, snake array is empty, invincibility is set
@@ -2074,6 +2091,7 @@ function update() {
         }
         sound.playEat();
         spawnParticles(food.x + BLOCK_SIZE / 2, food.y + BLOCK_SIZE / 2, 5, COLORS.food);
+        logToServer('Food eaten — score=' + GameState.score + ' length=' + GameState.snakeLength);
         foods.splice(i, 1); // remove this one food object (one circle)
         break;
     }
@@ -2224,6 +2242,7 @@ function update() {
                     }
                     GameState.targetsHit++;
                     targets.splice(j, 1);
+                    logToServer('Target destroyed type=' + t.type + ' targetsHit=' + GameState.targetsHit + ' score=' + GameState.score);
                 }
                 break;
             }
@@ -2379,7 +2398,8 @@ function endGame() {
     
     // Mark game as over immediately to prevent further updates
     GameState.gameOver = true;
-    
+    logToServer('Game over — score=' + GameState.score + ' length=' + GameState.snakeLength + ' lives=' + GameState.lives + ' highScore=' + GameState.highScore + ' foodEaten=' + (GameState.foodEaten || 0) + ' targetsHit=' + (GameState.targetsHit || 0));
+
     // Show loading screen before transitioning to game over
     showLoadingScreen();
     
@@ -2900,7 +2920,8 @@ document.addEventListener('keydown', (e) => {
     }
     
     const key = e.key.toLowerCase();
-    
+    logToServer('Key: ' + (e.key || key));
+
     // Direction controls
     if ((key === 'arrowup' || key === 'w') && GameState.dirY !== BLOCK_SIZE) {
         GameState.nextDirX = 0;
@@ -2966,6 +2987,7 @@ document.addEventListener('keydown', (e) => {
     
     // Restart with R
     if (key === 'r' && GameState.gameOver) {
+        logToServer('Restart (R) — reinitializing game');
         showLoadingScreen();
         // Start menu music IMMEDIATELY during loading
         sound.stopGameMusic();
@@ -3140,3 +3162,4 @@ if (document.readyState === 'loading') {
 }
 
 console.log('Fire Snake Game loaded! Open http://localhost:5050 to play.');
+logToServer('Session started at ' + new Date().toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'long' }) + ' — game loaded');
