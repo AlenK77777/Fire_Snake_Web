@@ -1460,6 +1460,13 @@ function initGame(resetLives = true) {
     GameState.autoFireCooldown = 0;
     GameState.invincibilityTimer = 0; // Reset invincibility
     GameState.lifeLostThisFrame = false; // Reset life loss flag
+
+    // Edges disappear: next disappearance in 10–30 sec (at 12 FPS)
+    GameState.edgesState = 'normal';
+    GameState.edgesNextDisappearInFrames = 10 * NORMAL_FPS + Math.floor(Math.random() * (21 * NORMAL_FPS)); // 10–30 sec
+    GameState.edgesWarningFramesLeft = 0;
+    GameState.edgesGoneFramesLeft = 0;
+    GameState.edgesGoneDurationFrames = 0;
     
     particles.length = 0;
     bullets.length = 0;
@@ -1961,8 +1968,35 @@ function updateStats() {
 // ==========================================
 // GAME UPDATE
 // ==========================================
+// Edges disappear: random 5–20 sec gone, 10–30 sec between (frames at NORMAL_FPS)
+function tickEdgesState() {
+    const FPS = NORMAL_FPS;
+    if (GameState.edgesState === 'normal') {
+        GameState.edgesNextDisappearInFrames--;
+        if (GameState.edgesNextDisappearInFrames <= 0) {
+            GameState.edgesState = 'warning';
+            GameState.edgesWarningFramesLeft = 3 * FPS; // 3 sec warning
+            GameState.edgesGoneDurationFrames = 5 * FPS + Math.floor(Math.random() * (16 * FPS)); // 5–20 sec
+        }
+    } else if (GameState.edgesState === 'warning') {
+        GameState.edgesWarningFramesLeft--;
+        if (GameState.edgesWarningFramesLeft <= 0) {
+            GameState.edgesState = 'gone';
+            GameState.edgesGoneFramesLeft = GameState.edgesGoneDurationFrames;
+        }
+    } else if (GameState.edgesState === 'gone') {
+        GameState.edgesGoneFramesLeft--;
+        if (GameState.edgesGoneFramesLeft <= 0) {
+            GameState.edgesState = 'normal';
+            GameState.edgesNextDisappearInFrames = 10 * FPS + Math.floor(Math.random() * (21 * FPS)); // 10–30 sec
+        }
+    }
+}
+
 function update() {
     if (GameState.gameOver || !GameState.gameStarted) return;
+
+    tickEdgesState();
     
     // CRITICAL: Check invincibility FIRST - skip ALL updates during invincibility
     const wasInvincible = GameState.invincibilityTimer > 0;
@@ -2015,13 +2049,21 @@ function update() {
     GameState.snakeX += GameState.dirX;
     GameState.snakeY += GameState.dirY;
     
-    // Check wall collision BEFORE adding head (same logic as working wall collision)
-    // Skip collision checks during invincibility
-    if (GameState.invincibilityTimer === 0 && (GameState.snakeX < 0 || GameState.snakeX >= GAME_WIDTH || GameState.snakeY < 0 || GameState.snakeY >= GAME_HEIGHT)) {
-        if (!loseLife()) {
-            endGame();
+    const outOfBounds = GameState.snakeX < 0 || GameState.snakeX >= GAME_WIDTH || GameState.snakeY < 0 || GameState.snakeY >= GAME_HEIGHT;
+    if (outOfBounds) {
+        if (GameState.edgesState === 'gone') {
+            // Wrap: exit one edge → appear on opposite
+            if (GameState.snakeX < 0) GameState.snakeX += GAME_WIDTH;
+            else if (GameState.snakeX >= GAME_WIDTH) GameState.snakeX -= GAME_WIDTH;
+            if (GameState.snakeY < 0) GameState.snakeY += GAME_HEIGHT;
+            else if (GameState.snakeY >= GAME_HEIGHT) GameState.snakeY -= GAME_HEIGHT;
+        } else {
+            // Walls active — lose life
+            if (GameState.invincibilityTimer === 0) {
+                if (!loseLife()) endGame();
+                return;
+            }
         }
-        return;
     }
     
     // Add new head to snake
@@ -2451,17 +2493,22 @@ function draw() {
         ctx.stroke();
     }
     
-    // Border
+    // Border (dim/dashed when edges are gone)
     let borderColor = '#00ff96';
     if (GameState.speedupTimer > 0) borderColor = COLORS.speedTarget;
     else if (GameState.slowdownTimer > 0) borderColor = COLORS.slowTarget;
-    
-    ctx.strokeStyle = hexToRgba(borderColor, 0.4);
+    const edgesGone = GameState.edgesState === 'gone';
+    if (edgesGone) {
+        ctx.setLineDash([8, 8]);
+        borderColor = '#ffaa00';
+    }
+    ctx.strokeStyle = hexToRgba(borderColor, edgesGone ? 0.5 : 0.4);
     ctx.lineWidth = 4;
     ctx.strokeRect(2, 2, GAME_WIDTH - 4, GAME_HEIGHT - 4);
-    ctx.strokeStyle = hexToRgba(borderColor, 0.8);
+    ctx.strokeStyle = hexToRgba(borderColor, edgesGone ? 0.6 : 0.8);
     ctx.lineWidth = 2;
     ctx.strokeRect(2, 2, GAME_WIDTH - 4, GAME_HEIGHT - 4);
+    if (edgesGone) ctx.setLineDash([]);
     
     if (GameState.gameOver) {
         drawGameOver();
@@ -2513,6 +2560,9 @@ function draw() {
         if (GameState.enemySnake && GameState.enemySnake.alive) {
             drawEnemyWarning();
         }
+
+        // Edges disappear: warning and timer overlay
+        drawEdgesOverlay();
         
         // Food timer
         drawFoodTimer();
@@ -2820,6 +2870,41 @@ function drawEnemyWarning() {
     ctx.font = 'bold 14px Arial';
     ctx.textAlign = 'center';
     ctx.fillText(`⚠ ENEMY: ${type.name.toUpperCase()} SNAKE ⚠`, GAME_WIDTH / 2, 60);
+}
+
+function drawEdgesOverlay() {
+    const FPS = NORMAL_FPS;
+    const state = GameState.edgesState;
+    if (state === 'normal') return;
+
+    const blink = Math.floor(GameState.foodPulse / 3) % 2 === 0;
+    const bgAlpha = blink ? 0.2 : 0.1;
+    const strokeAlpha = blink ? 0.4 : 0.225;
+    const textAlpha = blink ? 0.48 : 0.275;
+
+    ctx.fillStyle = `rgba(0, 0, 0, ${bgAlpha})`;
+    roundRect(GAME_WIDTH / 2 - 180, 78, 360, 44, 8);
+    ctx.strokeStyle = `rgba(255, 170, 0, ${strokeAlpha})`;
+    ctx.lineWidth = 2;
+    roundRect(GAME_WIDTH / 2 - 180, 78, 360, 44, 8);
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(255, 204, 0, ${textAlpha})`;
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+
+    if (state === 'warning') {
+        const secLeft = Math.ceil(GameState.edgesWarningFramesLeft / FPS);
+        const durationSec = Math.round(GameState.edgesGoneDurationFrames / FPS);
+        ctx.fillText(`⚠ EDGES DISAPPEAR IN ${secLeft}s — DURATION: ${durationSec}s`, GAME_WIDTH / 2, 100);
+        ctx.font = '12px Arial';
+        ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
+        ctx.fillText('You will wrap to the opposite side', GAME_WIDTH / 2, 116);
+    } else if (state === 'gone') {
+        const secLeft = Math.ceil(GameState.edgesGoneFramesLeft / FPS);
+        ctx.fillStyle = `rgba(255, 204, 0, ${textAlpha})`;
+        ctx.fillText(`EDGES GONE — BACK IN ${secLeft}s`, GAME_WIDTH / 2, 108);
+    }
 }
 
 function drawStartScreen() {

@@ -75,5 +75,12 @@ export const GameState = {
     // Sound
     soundMuted: false,
     userHasInteracted: false,
-    musicTempo: 1.0
+    musicTempo: 1.0,
+
+    // Edges disappear: 'normal' | 'warning' | 'gone'
+    edgesState: 'normal',
+    edgesWarningFramesLeft: 0,
+    edgesGoneFramesLeft: 0,
+    edgesNextDisappearInFrames: 0,
+    edgesGoneDurationFrames: 0
 };
