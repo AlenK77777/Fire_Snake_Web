@@ -1739,16 +1739,20 @@ function loseLife() {
     // CRITICAL: Reset all movement to zero to prevent any movement during invincibility
     GameState.dirX = 0;
     GameState.dirY = 0;
-    GameState.nextDirX = 0;
-    GameState.nextDirY = 0;
+    
+    // Set a random default direction immediately so the arrow can be shown and snake won't crash into itself
+    const directions = [
+        {x: 0, y: -BLOCK_SIZE},  // Up
+        {x: 0, y: BLOCK_SIZE},  // Down
+        {x: -BLOCK_SIZE, y: 0}, // Left
+        {x: BLOCK_SIZE, y: 0}   // Right
+    ];
+    const randomDir = directions[Math.floor(Math.random() * directions.length)];
+    GameState.nextDirX = randomDir.x;
+    GameState.nextDirY = randomDir.y;
     
     // CRITICAL: Don't add any segments to snake array yet
-    // The first segment will be added naturally when snake starts moving after invincibility
-    // This prevents self-collision issues when snake respawns
     // snake array stays empty until first movement after invincibility
-    
-    // Note: Random direction will be chosen when invincibility ends if player hasn't chosen direction
-    // This is handled in the update() function
     
     console.log('>>> Snake respawned at:', GameState.snakeX, GameState.snakeY, 'Length:', GameState.snakeLength, 'Invincibility:', GameState.invincibilityTimer, 'Snake segments:', snake.length, 'Lives:', GameState.lives);
     
@@ -1920,21 +1924,7 @@ function update() {
         return;
     }
     
-    // If invincibility just ended and player hasn't chosen direction, pick random direction
-    // This prevents self-collision when snake starts moving after respawn
-    if (wasInvincible && GameState.nextDirX === 0 && GameState.nextDirY === 0) {
-        // Choose random direction: up, down, left, or right
-        const directions = [
-            {x: 0, y: -BLOCK_SIZE},  // Up
-            {x: 0, y: BLOCK_SIZE},   // Down
-            {x: -BLOCK_SIZE, y: 0}, // Left
-            {x: BLOCK_SIZE, y: 0}    // Right
-        ];
-        const randomDir = directions[Math.floor(Math.random() * directions.length)];
-        GameState.nextDirX = randomDir.x;
-        GameState.nextDirY = randomDir.y;
-        console.log('>>> Random direction chosen after respawn:', GameState.nextDirX, GameState.nextDirY);
-    }
+    // Direction was already set in loseLife() (random) or by player; no need to set again here
     
     // Reset life loss flag at start of each frame (BEFORE any collision checks)
     // This ensures we can detect collisions, but only lose one life per frame
@@ -2492,6 +2482,57 @@ function draw() {
     GameState.foodPulse += 0.15;
 }
 
+// Draw "Choose direction" text and direction arrow during respawn invincibility
+function drawRespawnDirectionUI(centerX, segmentTopY) {
+    if (!ctx) return;
+    const textY = segmentTopY - 28;
+    const arrowY = segmentTopY - 12;
+    
+    // "Choose direction" text above the snake
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Choose direction', centerX, textY);
+    ctx.fillStyle = '#00ff96';
+    ctx.fillText('Choose direction', centerX, textY);
+    
+    // Arrow pointing in nextDir direction (nextDirX, nextDirY)
+    const dx = GameState.nextDirX;
+    const dy = GameState.nextDirY;
+    const size = 14;
+    
+    ctx.fillStyle = '#00ff96';
+    ctx.strokeStyle = 'rgba(0, 255, 150, 0.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    
+    if (dy < 0) {
+        // Up
+        ctx.moveTo(centerX, arrowY - size);
+        ctx.lineTo(centerX - size * 0.8, arrowY + size * 0.6);
+        ctx.lineTo(centerX + size * 0.8, arrowY + size * 0.6);
+    } else if (dy > 0) {
+        // Down
+        ctx.moveTo(centerX, arrowY + size);
+        ctx.lineTo(centerX - size * 0.8, arrowY - size * 0.6);
+        ctx.lineTo(centerX + size * 0.8, arrowY - size * 0.6);
+    } else if (dx < 0) {
+        // Left
+        ctx.moveTo(centerX - size, arrowY);
+        ctx.lineTo(centerX + size * 0.6, arrowY - size * 0.8);
+        ctx.lineTo(centerX + size * 0.6, arrowY + size * 0.8);
+    } else {
+        // Right (or default if both 0)
+        ctx.moveTo(centerX + size, arrowY);
+        ctx.lineTo(centerX - size * 0.6, arrowY - size * 0.8);
+        ctx.lineTo(centerX - size * 0.6, arrowY + size * 0.8);
+    }
+    
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+}
+
 function drawSnake() {
     const isSlowed = GameState.slowdownTimer > 0;
     const isFast = GameState.speedupTimer > 0;
@@ -2508,6 +2549,8 @@ function drawSnake() {
                 ctx.fillStyle = color;
                 ctx.fillRect(GameState.snakeX, GameState.snakeY, BLOCK_SIZE, BLOCK_SIZE);
             }
+            // Always show "Choose direction" and arrow during respawn invincibility
+            drawRespawnDirectionUI(GameState.snakeX + BLOCK_SIZE / 2, GameState.snakeY);
         } else {
             // Normal draw when not invincible
             const color = COLORS.snakeHead;
